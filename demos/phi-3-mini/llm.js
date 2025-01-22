@@ -26,51 +26,47 @@ export class LLM {
     provider = "webnn";
     sess = undefined;
     feed = {};
+    input_ids = [];
     output_tokens = [];
-    eos = [32007, 32000]; // end tokens
     need_position_ids = true;
     stop = false;
     kv_dims = [];
     dtype = "float16";
-    max_seq = 128;
-    max_cache = 256;
-    attn_mask_len = 384;
+    deviceType = "gpu";
+    max_length = 2048;
     start_len = 0;
     ml_context = undefined;
 
-    constructor(max_seq, max_cache, dataType) {
-        this.dtype = dataType;
-        this.max_seq = max_seq;
-        this.max_cache = max_cache;
-        this.attn_mask_len = max_seq + max_cache;
+    constructor(max_length) {
+        this.max_length = max_length;
     }
 
     async load(model, options, flag = true) {
         this.provider = options.provider;
+        this.deviceType = options.devicetype;
         const verbose = options.verbose;
-        this.kv_dims = [1, 32, this.max_cache, 96];
-        this.num_layers = 32;
+        this.eos = model.eos_token_id; // end of sentence token ids
+        this.num_layers = model.num_layers;
+        this.kv_dims = [1, model.kv_num_heads, this.max_length, model.head_size];
         log(`WebNN EP config: ${model} · ${this.dtype} · ${this.provider}`);
 
         const path = location.href.includes("github.io")
             ? "https://huggingface.co/webnn/Phi3-mini-4k-instruct-static/resolve/main/"
-            : "models/";
-
-        const type_suffix = this.dtype == "float16" ? "_fp16" : "";
-        const model_file = `Phi_3_mini_4k_instruct_static_kvcache_uint4_sink_simlayernorm${type_suffix}.onnx`;
+            : "models/";            
+        const model_file = model.path;
         const model_path = path + model_file;
-        const model_bytes = await getModelOPFS(`id_${model_file}`, model_path, false);
+        const model_bytes = await getModelOPFS(`id_${model_file}`, model_path, true); // Fix me, should be false
         const external_file = model_file + ".data";
         const external_data_path = path + external_file;
-        const external_data_bytes = await getModelOPFS(`id_${external_file}`, external_data_path, false);
+        const external_data_bytes = await getModelOPFS(`id_${external_file}`, external_data_path, true); // Fix me, should be false
 
         let model_size = model_bytes.byteLength;
         model_size += external_data_bytes.byteLength;
 
         log(`Phi-3 Mini model size: ${Math.round(model_size / 1024 / 1024)} MB`);
-        this.ml_context = await navigator.ml.createContext({ deviceType: "gpu" });
+        this.ml_context = await navigator.ml.createContext({ deviceType: this.deviceType });
         const session_options = {
-            executionProviders: [{ name: this.provider, deviceType: "gpu", context: this.ml_context }],
+            executionProviders: [{ name: this.provider, deviceType: this.deviceType, context: this.ml_context }],
             externalData: [
                 {
                     data: external_data_bytes,
@@ -86,8 +82,8 @@ export class LLM {
                 // Bind kv cache outputs to ml-tensor or gpu-buffer
                 session_options.preferredOutputLocation = {};
                 for (let i = 0; i < 32; ++i) {
-                    session_options.preferredOutputLocation[`new_present_key_values.${i}.decoder.key`] = location_type;
-                    session_options.preferredOutputLocation[`new_present_key_values.${i}.decoder.value`] = location_type;
+                    session_options.preferredOutputLocation[`present.${i}.key`] = location_type;
+                    session_options.preferredOutputLocation[`present.${i}.value`] = location_type;
                 }
                 break;
             case "wasm":
@@ -102,10 +98,10 @@ export class LLM {
 
         if (this.provider == "webnn") {
             session_options.freeDimensionOverrides = {
-                max_seq_len: this.max_seq,
-                "max_cache_len+max_seq_len": this.attn_mask_len,
-                max_cache_len: this.max_cache,
-                sink_len: 2,
+                batch_size: 1,
+                sequence_length: this.max_length,
+                total_sequence_length: this.max_length,
+                past_sequence_length: this.max_length,
             };
         }
 
@@ -114,7 +110,6 @@ export class LLM {
         console.log("Create session 1 with option: ");
         console.log({ ...session_options });
         this.sess_1 = await ort.InferenceSession.create(model_bytes, session_options);
-
         updateOnnxCompileProgress(10);
         updateLoadProgress(onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress);
         updateProgressBar(loadProgress.toFixed(2));
@@ -123,10 +118,10 @@ export class LLM {
         log("Prefill session created");
         if (this.provider == "webnn") {
             session_options.freeDimensionOverrides = {
-                max_seq_len: 1,
-                "max_cache_len+max_seq_len": 1 + this.max_cache,
-                max_cache_len: this.max_cache,
-                sink_len: 2,
+                batch_size: 1,
+                sequence_length: 1,
+                total_sequence_length: this.max_length,
+                past_sequence_length: this.max_length,
             };
             log("Create session for decode process");
             console.log("Create session 2 with option: ");
@@ -158,16 +153,15 @@ export class LLM {
         }
 
         this.feed = {};
-        this.feed["sink_range"] = new ort.Tensor("int32", Int32Array.from([0, 1]), [2]);
         if (this.provider == "webnn") {
             // init kv cache ml-tensor
             const kv_desc = { dataType: this.dtype, shape: this.kv_dims };
             const ort_kv_desc = { dataType: this.dtype, dims: this.kv_dims };
             const input_ml_tensor = await this.ml_context.createTensor(kv_desc);
             for (let i = 0; i < this.num_layers; ++i) {
-                this.feed[`past_key_values.${i}.decoder.key`] =
+                this.feed[`past_key_values.${i}.key`] =
                     ort.Tensor.fromMLTensor(input_ml_tensor, ort_kv_desc);
-                this.feed[`past_key_values.${i}.decoder.value`] =
+                this.feed[`past_key_values.${i}.value`] =
                     ort.Tensor.fromMLTensor(input_ml_tensor, ort_kv_desc);
             }
         } else {
@@ -175,8 +169,8 @@ export class LLM {
             const empty =
                 this.dtype === "float16" ? new Uint16Array(kv_num_elements) : new Float32Array(kv_num_elements);
             for (let i = 0; i < this.num_layers; ++i) {
-                this.feed[`past_key_values.${i}.decoder.key`] = new ort.Tensor(this.dtype, empty, this.kv_dims);
-                this.feed[`past_key_values.${i}.decoder.value`] = new ort.Tensor(this.dtype, empty, this.kv_dims);
+                this.feed[`past_key_values.${i}.key`] = new ort.Tensor(this.dtype, empty, this.kv_dims);
+                this.feed[`past_key_values.${i}.value`] = new ort.Tensor(this.dtype, empty, this.kv_dims);
             }
         }
     }
@@ -184,7 +178,7 @@ export class LLM {
     // update key value cache
     update_kv_cache(outputs) {
         for (const name in outputs) {
-            if (name.includes("new_present_key_values")) {
+            if (name.includes("present.")) {
                 let newName = name.replace(name.split(".")[0], "past_key_values");
                 const t = this.feed[newName];
                 // dispose previous tensors
@@ -204,10 +198,11 @@ export class LLM {
     }
 
     // padding input array with 0
-    padding_input(input, max_length, reverse = false) {
-        if (input.length >= max_length) return input;
+    padding_input(origin_input, max_length, reverse = false) {
+        let input = origin_input.slice();
+        if (input.length >= max_length) return input.slice(0, max_length);
         const padding_length = max_length - input.length;
-        const padding = Array.from({ length: padding_length }, () => 0);
+        const padding = Array.from({ length: padding_length }, () => 0n);
         if (reverse) {
             padding.push(...input);
             return padding;
@@ -216,52 +211,65 @@ export class LLM {
             return input;
         }
     }
-    //
+
     // tell generate to stop()
-    //
     abort() {
         this.stop = true;
     }
 
-    // prefill prompt and generate tokens, greedy search only
-    async generate(input_ids, cleanKV, callback) {
-        if (this.output_tokens.length == 0) {
-            // first question for sink 2
-            input_ids = [1, 1].concat(input_ids);
+    // poor mens argmax
+    argmax(t, seq_len = 1) {
+        const arr = t.cpuData;
+        for (let i = 0; i < arr.length; i++) {
+            // if (!isFinite(arr[i]))
+                // console.log('found infinitive in logits=', arr[i]);
         }
+        let start = t.dims[2] * (seq_len - 1);
+        let max = arr[start];
+        let maxidx = 0;
+
+        for (let i = 0; i < t.dims[2]; i++) {
+            const val = arr[i + start];
+            if (!isFinite(val)) {
+                throw new Error("found infinitive in logits");
+            }
+            if (val > max) {
+                max = arr[i + start];
+                maxidx = i;
+            }
+        }
+        return maxidx;
+    }
+
+    // prefill prompt and generate tokens, greedy search only
+    async generate(input_ids, cleanCache, callback) {
         this.output_tokens = [];
-        if (cleanKV) {
+        if (cleanCache) {
             // clear cache
             this.start_len = 0;
-        }
-        const input_ids_len = input_ids.length;
-        let attn_mask;
-        if (this.start_len == 0) {
-            attn_mask = Array.from({ length: this.max_cache }, () => 0);
+            this.input_ids = [];
         } else {
-            attn_mask = Array.from({ length: Math.min(this.start_len, this.max_cache) }, () => 1);
+            // TODO: empty kv?
         }
+        this.input_ids = this.input_ids.concat(input_ids);
+        const input_ids_len = this.input_ids.length;
 
-        // padding input_ids and attn_mask
-        input_ids = this.padding_input(input_ids, this.max_seq);
-        attn_mask = this.padding_input(attn_mask, this.max_cache, true);
-        attn_mask = this.padding_input(attn_mask, this.attn_mask_len);
-        for (let i = this.max_cache; i < this.max_cache + input_ids_len; i++) {
-            attn_mask[i] = 1;
-        }
-
-        this.feed["input_ids"] = new ort.Tensor("int32", Int32Array.from(input_ids), [1, this.max_seq]);
-        const attention_mask = new ort.Tensor("int32", Int32Array.from(attn_mask), [1, this.attn_mask_len]);
-        this.feed["attention_mask"] = attention_mask;
-        const position_ids = Array.from({ length: this.max_seq }, (_, i) => this.start_len + i);
-        this.feed["position_ids"] = new ort.Tensor("int32", Int32Array.from(position_ids), [1, this.max_seq]);
+        let attn_mask = Array.from({ length: input_ids_len }, () => BigInt(1));
+        const position_ids = Array.from({ length: input_ids_len }, (_, i) => BigInt(i++));
+        // Padding input_ids, attention_mask, position_ids to have length of this.max_length
+        const input_ids_buffer = this.padding_input(this.input_ids, this.max_length);
+        const attn_mask_buffer = this.padding_input(attn_mask, this.max_length);
+        const position_ids_buffer = this.padding_input(position_ids, this.max_length);
+        this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(input_ids_buffer), [1, this.max_length]);
+        this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attn_mask_buffer), [1, this.max_length]);
+        this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(position_ids_buffer), [1, this.max_length]);
         this.stop = false;
 
         let last_token = 0;
         let outputs = await this.sess_1.run(this.feed);
-        last_token = outputs["token_id"].cpuData[0];
+        last_token = this.argmax(outputs["casted_logits"], input_ids_len);
         console.log("first token: ", last_token);
-        this.start_len += input_ids_len;
+        this.start_len = input_ids_len;
         this.output_tokens.push(last_token);
         if (callback) {
             callback(this.output_tokens);
@@ -269,18 +277,21 @@ export class LLM {
         let seqlen = input_ids_len;
 
         this.update_kv_cache(outputs);
-        log(`Max length of output tokens: 1024`);
-        while (this.eos.indexOf(last_token) == -1 && !this.stop && this.output_tokens.length <= 1024) {
-            this.feed["input_ids"] = new ort.Tensor("int32", Int32Array.from([last_token]), [1, 1]);
-            attn_mask = Array.from({ length: Math.min(this.start_len, this.max_cache) }, () => 1);
-            attn_mask = this.padding_input(attn_mask, this.max_cache, true);
-            attn_mask = this.padding_input(attn_mask, this.max_cache + 1);
-            attn_mask[this.max_cache] = 1;
-            this.feed["attention_mask"] = new ort.Tensor("int32", new Int32Array(attn_mask), [1, this.max_cache + 1]);
-            this.feed["position_ids"] = new ort.Tensor("int32", Int32Array.from([this.start_len]), [1, 1]);
-
-            outputs = await this.sess_2.run(this.feed);
-            last_token = outputs["token_id"].cpuData[0];
+        log(`Max length of output tokens: ${this.max_length}`);
+        while (this.eos.indexOf(last_token) == -1 &&
+               !this.stop &&
+               this.output_tokens.length <= (this.max_length - input_ids_len)) {
+            this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(last_token)]), [1, 1]);
+            attn_mask.push(BigInt(1));
+            const attn_mask_buffer = this.padding_input(attn_mask, this.max_length);
+            this.feed["attention_mask"] = new ort.Tensor("int64", new BigInt64Array(attn_mask_buffer), [1, this.max_length]);
+            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(this.start_len)]), [1, 1]);
+            if (this.provider == "webnn") {
+                outputs = await this.sess_2.run(this.feed);
+            } else {
+                outputs = await this.sess_1.run(this.feed);
+            }
+            last_token = this.argmax(outputs["casted_logits"]);
 
             console.log("next token: ", last_token);
             this.output_tokens.push(last_token);
@@ -289,9 +300,12 @@ export class LLM {
             }
             this.update_kv_cache(outputs);
             this.start_len += 1;
+            console.log('start len: ', this.start_len);
             // eslint-disable-next-line no-unused-vars
             seqlen += 1;
         }
+
+        this.input_ids = this.input_ids.concat(this.output_tokens.map(num => BigInt(num)));
         return this.output_tokens;
     }
 }

@@ -14,9 +14,49 @@ import {
     setupORT,
     showCompatibleChromiumVersion,
 } from "../../assets/js/common_utils.js";
-import { env, AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1";
+import { env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.1';
 import { LLM } from "./llm.js";
 import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
+
+const MODELS = {
+    "llama": {
+        name: "llama",
+        desc: "Meta TinyLlama-1.1B-Chat-v1.0",
+        id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        path: "llama_webnn.onnx",
+        eos_token_id: [151645, 151643, 2],
+        max_length: 2048,
+        num_layers: 22,
+        kv_num_heads: 4,
+        head_size: 64,
+        system_content: "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer.", // You are a friendly chatbot who always responds in the style of a pirate",
+    },
+    "phi3": {
+        name: "phi3",
+        desc: "Microsoft Phi-3-mini-4k-instruct",
+        id: "microsoft/Phi-3-mini-4k-instruct",
+        path: "phi3_webnn.onnx",
+        eos_token_id: [32000, 32001, 32007],
+        max_length: 4096,
+        num_layers: 32,
+        kv_num_heads: 32,
+        head_size: 96,
+        system_content: "You are a helpful AI assistant.",
+    },
+    
+    "qwen2": {
+        name: "qwen2",
+        desc: "Alibaba Qwen2-0.5B-Instruct",
+        id: "Qwen/Qwen2-0.5B-Instruct",
+        path: "qwen2_webnn.onnx",
+        eos_token_id: [151645, 151643],
+        max_length: 32768,
+        num_layers: 24,
+        kv_num_heads: 2,
+        head_size: 64,
+        system_content: "You are a helpful assistant.",
+    },
+}
 
 let performanceIndicator;
 let userInput, chatHistory;
@@ -27,7 +67,7 @@ let device;
 let badge;
 let ctrl = false,
     ready = false,
-    cleanKV = false;
+    cleanCache = false;
 
 const clipboardIcon = `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='currentColor' class='bi bi-clipboard' viewBox='0 0 16 16'>
 <path d='M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z'/>
@@ -187,7 +227,7 @@ async function submitRequest(e) {
 $("#user-input").addEventListener("keydown", async function (e) {
     if (e.ctrlKey && e.key === "Enter") {
         ctrl = true;
-        cleanKV = true;
+        cleanCache = true;
         submitRequest(e);
     } else if (e.key === "Enter") {
         e.preventDefault();
@@ -202,17 +242,16 @@ function getConfig() {
         model: "phi3",
         provider: "webnn",
         devicetype: "gpu",
-        dtype: "float16",
         profiler: 0,
         verbose: 0,
         threads: 1,
         show_special: 0,
         csv: 0,
-        max_seq: 128,
-        max_cache: 256,
+        max_length: 256,
         local: 1,
     };
     let vars = query.split("&");
+    let err_msg = "";
     for (var i = 0; i < vars.length; i++) {
         let pair = vars[i].split("=");
         if (pair[0] in config) {
@@ -224,8 +263,22 @@ function getConfig() {
                 config[key] = value;
             }
         } else if (pair[0].length > 0) {
-            throw new Error("unknown argument: " + pair[0]);
+            err_msg = `unknown argument: ${pair[0]}`;
+            logUser(err_msg);
+            throw new Error(err_msg);
         }
+    }
+    if (MODELS[config.model] !== undefined) {
+        config.model = MODELS[config.model];
+    } else {
+        err_msg = `Unsupported model name: ${config.model}`;
+        logError(err_msg);
+        throw new Error(err_msg);
+    }
+    if (config.max_length < 0 || config.max_length > config.model.context_length) {
+        err_msg = `max_length should not execeed ${config.model.context_length}`;
+        logError(err_msg);
+        throw new Error(err_msg);
     }
     return config;
 }
@@ -239,33 +292,50 @@ env.allowLocalModels = config.local == 1;
 
 let tokenizer;
 
-const llm = new LLM(config.max_seq, config.max_cache, config.dtype);
+const llm = new LLM(config.max_length);
+let system_chat_template;
+if (config.model.system_content != "") {
+    system_chat_template = {"role": "system", "content": config.model.system_content};
+}
 
 function token_to_text(tokenizer, tokens) {
     const txt = tokenizer.decode(tokens, { skip_special_tokens: config.show_special != 1 });
+    console.log(txt);
     return txt;
 }
 
 async function Query(continuation, query, cb) {
-    console.log("continuation: ", continuation);
     performanceIndicator.innerHTML = "";
-
     logUser(`Prompt: ${query}`);
-    let prompt = `<|user|>\n${query}<|end|>\n<|assistant|>\n`;
-    if (llm.output_tokens.length == 0 || !continuation || cleanKV) {
+    let user_chat_template = {"role": "user", "content": query};
+    let messages = [];
+    let prompt = `<|user|>\n${query}<|end|>\n<|assistant|>\n`;   // work with qwen2, phi3
+    // Fix me: Currently we clean all cache when the cache is full, find other strategy to clean the top of the cache
+    if (llm.output_tokens.length == 0 || !continuation || cleanCache) { // || llm.start_len + input_ids_len > llm.max_length) {
         // clear kv cache
         await llm.initialize_feed();
-        prompt = `<|system|>\nYou are a friendly assistant.<|end|>\n` + prompt;
+        if (system_chat_template) messages.push(system_chat_template);
+        cleanCache = true;
+        prompt = `<|system|>\n${config.model.system_content}<|end|>\n<|user|>\n${query}<|end|>\n<|assistant|>\n`;
     }
 
-    console.log("prompt: ", prompt);
+    let { input_ids } = await tokenizer(prompt, { return_tensor: false, padding: true, truncation: true });
+    console.log('input ids from tokenizer: ', input_ids);
+    messages.push(user_chat_template);
+    console.log('messages: ', messages);
+    if (config.model.name == 'phi3' || true) {
+        let add_generation_prompt = true; // config.model.name == "llama" ? false : true;
+        input_ids = tokenizer.apply_chat_template(messages, { tokenize: true, return_tensor: false, add_generation_prompt});
+    }
+    // convert input_ids to BigInt
+    console.log('input ids: ', input_ids);
+    input_ids = input_ids.map(num => BigInt(num));
+    const input_ids_len = input_ids.length;
+    logUser(`Prompt length: ${input_ids_len}`);
 
-    const { input_ids } = await tokenizer(prompt, { return_tensor: false, padding: true, truncation: true });
-    console.log("Prompt length: ", input_ids.length);
-    logUser(`Prompt length: ${input_ids.length}`);
     let time_to_first_token;
     const start_timer = performance.now();
-    const output_tokens = await llm.generate(input_ids, cleanKV, output_tokens => {
+    const output_tokens = await llm.generate(input_ids, cleanCache, output_tokens => {
         if (output_tokens.length == 1) {
             // time to first token
             time_to_first_token = (performance.now() - start_timer) / 1000;
@@ -273,7 +343,7 @@ async function Query(continuation, query, cb) {
         cb(token_to_text(tokenizer, output_tokens));
     });
 
-    cleanKV = false;
+    cleanCache = false;
 
     const took = (performance.now() - start_timer) / 1000;
     const time_to_new_tokens = took - time_to_first_token;
@@ -327,24 +397,13 @@ const main = async () => {
     userInput.focus();
 
     try {
-        let model_id;
-        if (
-            location.href.toLowerCase().indexOf("github.io") > -1 ||
-            location.href.toLowerCase().indexOf("huggingface.co") > -1 ||
-            location.href.toLowerCase().indexOf("vercel.app") > -1
-        ) {
-            model_id = "microsoft/Phi-3-mini-4k-instruct";
-        } else {
-            model_id = `microsoft/Phi-3-mini-4k-instruct`;
-        }
-
-        tokenizer = await AutoTokenizer.from_pretrained(model_id);
+        tokenizer = await AutoTokenizer.from_pretrained(config.model.id);
         await llm.load(config.model, {
             provider: config.provider,
+            devicetype: config.devicetype,
             profiler: config.profiler,
             verbose: config.verbose,
             local: config.local,
-            max_seq: config.max_seq,
         });
         sendButton.disabled = false;
         ready = true;
