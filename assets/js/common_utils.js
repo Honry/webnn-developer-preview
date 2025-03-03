@@ -372,6 +372,11 @@ function float16ToNumber(input) {
 
 // convert Uint16Array to Float32Array
 export function convertToFloat32Array(fp16_array) {
+    // It is real Float16Array
+    if (typeof Float16Array !== "undefined" && fp16_array instanceof Float16Array) {
+        return Float32Array.from(fp16_array, v => v);
+    }
+    // It is Uint16Array that represents Float16Array
     const fp32_array = new Float32Array(fp16_array.length);
     for (let i = 0; i < fp32_array.length; i++) {
         fp32_array[i] = float16ToNumber(fp16_array[i]);

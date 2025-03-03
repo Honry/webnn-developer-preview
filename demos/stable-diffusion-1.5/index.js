@@ -737,7 +737,6 @@ function displayPlanarRGB(planarPixelData /*: Float32Array or Uint16Array as flo
     // https://github.com/microsoft/onnxruntime/blob/main/js/common/lib/tensor-factory.ts#L147
     //
     // let imageData = planarPixelTensor.toImageData({format: 'RGB', tensorLayout: 'NCHW', norm:{bias: 1, mean: 128}});
-
     let conversionFunction =
         planarPixelData instanceof Float32Array
             ? convertPlanarFloat32RgbToUint8Rgba
@@ -1081,8 +1080,17 @@ async function executeStableDiffusionAndDisplayOutput() {
         let rgbPlanarPixels = await executeStableDiffusion();
         const executionTime = performance.now() - executionStartTime;
         performanceData.sessionrun.total = executionTime.toFixed(2);
-
-        displayPlanarRGB(await rgbPlanarPixels.getData());
+        let planarPixelData = await rgbPlanarPixels.getData();
+        if (typeof Float16Array != 'undefined' && planarPixelData instanceof Float16Array) {
+            // Convert Float16Array back to Uint16Array,
+            // a simple way to make it compatible with ORT-Web's Float16Array output.
+            planarPixelData = new Uint16Array(
+                planarPixelData.buffer,
+                planarPixelData.byteOffset,
+                planarPixelData.length,
+            );
+        }
+        displayPlanarRGB(planarPixelData);
 
         if (Utils.getSafetyChecker()) {
             // safety_checker

@@ -28,7 +28,7 @@ const MODELS = {
     sam_b: [
         {
             name: "SAM ViT-B Encoder (FP16)",
-            url: "sam_vit_b_01ec64.encoder-fp16.onnx",
+            url: "sam_vit_b_01ec64.encoder-fp16-rank5.onnx",
             size: "171MB",
         },
         {
@@ -89,7 +89,7 @@ function getConfig() {
     const query = window.location.search.substring(1);
     const config = {
         host: location.href.includes("github.io")
-            ? "https://huggingface.co/microsoft/segment-anything-model-webnn/resolve/main"
+            ? "https://huggingface.co/lwanming/segment-anything/resolve/main"
             : "models",
         mode: "none",
         model: "sam_b",
@@ -103,7 +103,7 @@ function getConfig() {
         let pair = vars[i].split("=");
         if (pair[0] in config) {
             config[pair[0]] = decodeURIComponent(pair[1]);
-        } else if (pair[0].toLowerCase() === 'devicetype') {
+        } else if (pair[0].toLowerCase() === "devicetype") {
             config.deviceType = decodeURIComponent(pair[1]);
         } else if (pair[0].length > 0) {
             throw new Error("unknown argument: " + pair[0]);
@@ -631,12 +631,11 @@ const ui = async () => {
     const deviceType = config.deviceType.toLowerCase();
     const provider = config.provider.toLowerCase();
 
-    if (deviceType ===  "cpu" || provider === "wasm") {
+    if (deviceType === "cpu" || provider === "wasm") {
         device.innerHTML = "CPU";
         badge.setAttribute("class", "cpu");
         document.body.setAttribute("class", "cpu");
-    } else if (
-        deviceType === "gpu" || provider === "webgpu") {
+    } else if (deviceType === "gpu" || provider === "webgpu") {
         device.innerHTML = "GPU";
         badge.setAttribute("class", "");
         document.body.setAttribute("class", "gpu");

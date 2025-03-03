@@ -197,6 +197,13 @@ export class Whisper {
         const { last_hidden_state } = await this.models["encoder"]["sess"].run({
             input_features: new ort.Tensor(encoder_inputs.type, encoder_inputs.data, encoder_inputs.dims),
         });
+        if (typeof Float16Array != "undefined" && last_hidden_state.cpuData instanceof Float16Array) {
+            last_hidden_state.cpuData = new Uint16Array(
+                last_hidden_state.cpuData.buffer,
+                last_hidden_state.cpuData.byteOffset,
+                last_hidden_state.cpuData.length,
+            );
+        }
         // log(`Encoder inference time: ${(performance.now() - start).toFixed(2)}ms`);
         // start = performance.now();
         // -----------------------------------DECODER 1ST INFERENCE-----------------------------------------
@@ -221,9 +228,19 @@ export class Whisper {
         // console.log(`Non-KV cache decoder input preparation time: ${(performance.now() - start).toFixed(2)}ms`);
         // start = performance.now();
         // run the first inference which generates SA and CA KV cache
-        const decoder_output = await this.models["decoder"]["sess"].run(decoder_input);
+        let decoder_output = await this.models["decoder"]["sess"].run(decoder_input);
         // console.log(`Non-KV cache decoder inference time: ${(performance.now() - start).toFixed(2)}ms`);
         // start = performance.now();
+
+        for (const key in decoder_output) {
+            if (typeof Float16Array != "undefined" && decoder_output[key].cpuData instanceof Float16Array) {
+                decoder_output[key].cpuData = new Uint16Array(
+                    decoder_output[key].cpuData.buffer,
+                    decoder_output[key].cpuData.byteOffset,
+                    decoder_output[key].cpuData.length,
+                );
+            }
+        }
         let logits = decoder_output["logits"]["cpuData"];
 
         if (this.dataType == "float16") {
@@ -286,11 +303,19 @@ export class Whisper {
         for (let i = 4; i < this.max_sequence_length; i++) {
             // console.log(`Decoder input preparation time · iteration ${i-3}: ${(performance.now() - start).toFixed(2)}ms`);
             // start = performance.now();
-            const decoder_cached_output = await this.models["decoder_cached"]["sess"].run(decoder_input);
-
+            let decoder_cached_output = await this.models["decoder_cached"]["sess"].run(decoder_input);
             // console.log(`Decoder inference time · Iteration ${i-3}: ${(performance.now() - start).toFixed(2)}ms`);
             // start = performance.now();
             // find out the token with highest probability, cast INT64 to INT32
+            for (const key in decoder_cached_output) {
+                if (typeof Float16Array != "undefined" && decoder_cached_output[key].cpuData instanceof Float16Array) {
+                    decoder_cached_output[key].cpuData = new Uint16Array(
+                        decoder_cached_output[key].cpuData.buffer,
+                        decoder_cached_output[key].cpuData.byteOffset,
+                        decoder_cached_output[key].cpuData.length,
+                    );
+                }
+            }
             let logits = decoder_cached_output["logits"]["cpuData"];
             if (this.dataType == "float16") {
                 logits = convertToFloat32Array(logits);
