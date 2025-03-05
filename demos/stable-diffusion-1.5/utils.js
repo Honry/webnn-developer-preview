@@ -1,6 +1,6 @@
 /* eslint-disable no-undef */
 import { AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.13.4";
-import { getQueryValue } from "../../assets/js/common_utils.js";
+import { isFloat16ArrayAvailable, getQueryValue } from "../../assets/js/common_utils.js";
 let tokenizers;
 document.addEventListener("DOMContentLoaded", async () => {
     let path = "";
@@ -67,7 +67,9 @@ export function generateTensorFillValue(dataType, shape, value) {
         case "float16":
             return new ort.Tensor(
                 dataType,
-                Uint16Array.from({ length: size }, () => value),
+                isFloat16ArrayAvailable
+                    ? Float16Array.from({ length: size }, () => value)
+                    : Uint16Array.from({ length: size }, () => value),
                 shape,
             );
         case "float32":
@@ -114,7 +116,11 @@ export function generateTensorFromValues(dataType, shape, values) {
         case "int32":
             return new ort.Tensor(dataType, new Int32Array(values), shape);
         case "float16":
-            return new ort.Tensor(dataType, new Uint16Array(values), shape);
+            return new ort.Tensor(
+                dataType,
+                isFloat16ArrayAvailable ? new Float16Array(values) : new Uint16Array(values),
+                shape,
+            );
         case "float32":
             return new ort.Tensor(dataType, new Float32Array(values), shape);
         case "uint64":
@@ -136,6 +142,7 @@ export function generateTensorFromBytes(dataType, shape, values) {
     if (!(values instanceof ArrayBuffer)) {
         values = values.buffer;
     }
+
     switch (dataType) {
         case "uint8":
             return new ort.Tensor(dataType, new Uint8Array(values), shape);
@@ -150,7 +157,11 @@ export function generateTensorFromBytes(dataType, shape, values) {
         case "int32":
             return new ort.Tensor(dataType, new Int32Array(values), shape);
         case "float16":
-            return new ort.Tensor(dataType, new Uint16Array(values), shape);
+            return new ort.Tensor(
+                dataType,
+                isFloat16ArrayAvailable ? new Float16Array(values) : new Uint16Array(values),
+                shape,
+            );
         case "float32":
             return new ort.Tensor(dataType, new Float32Array(values), shape);
         case "uint64":

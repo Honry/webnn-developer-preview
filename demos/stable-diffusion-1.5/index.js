@@ -8,6 +8,7 @@
 import * as Utils from "./utils.js";
 import {
     $,
+    isFloat16ArrayAvailable,
     convertToUint16Array,
     log,
     logError,
@@ -985,6 +986,10 @@ async function executeStableDiffusion() {
 
     const halfLatentElementCount = latentsTensor.size / 2; // Given [2, 4, 64, 64], we want only the first batch.
     let latents = await latentsTensor.getData();
+    if (isFloat16ArrayAvailable) {
+        // If Float16Array is available, convert latents back to Uint16Array for post-processing.
+        latents = new Uint16Array(latents.buffer, latents.byteOffset, latents.length);
+    }
     let halfLatents = latents.subarray(0, halfLatentElementCount); // First batch only.
     prescaleLatentSpace(/*inout*/ halfLatents, defaultSigmas[0]);
 
@@ -1016,6 +1021,7 @@ async function executeStableDiffusion() {
             [unetBatch, unetChannelCount, latentHeight, latentWidth],
             nextLatents,
         );
+
         const unetOutputs = await unetModelSession.run(unetInputs);
 
         let predictedNoise = new Uint16Array(unetOutputs["out_sample"].cpuData.buffer);
@@ -1049,6 +1055,7 @@ async function executeStableDiffusion() {
     const vaeDecoderInputs = {
         latent_sample: Utils.generateTensorFromBytes("float16", dimensions, halfLatents.slice(0)),
     };
+
     const decodedOutputs = await vaeDecoderModelSession.run(vaeDecoderInputs);
     let vaeDecoderExecutionTime = (performance.now() - startVaeDecoder).toFixed(2);
 
@@ -1081,14 +1088,9 @@ async function executeStableDiffusionAndDisplayOutput() {
         const executionTime = performance.now() - executionStartTime;
         performanceData.sessionrun.total = executionTime.toFixed(2);
         let planarPixelData = await rgbPlanarPixels.getData();
-        if (typeof Float16Array != 'undefined' && planarPixelData instanceof Float16Array) {
-            // Convert Float16Array back to Uint16Array,
-            // a simple way to make it compatible with ORT-Web's Float16Array output.
-            planarPixelData = new Uint16Array(
-                planarPixelData.buffer,
-                planarPixelData.byteOffset,
-                planarPixelData.length,
-            );
+        if (isFloat16ArrayAvailable) {
+            // If Float16Array is available, convert Float16Array to Float32Array directly.
+            planarPixelData = Float32Array.from(planarPixelData, v => v);
         }
         displayPlanarRGB(planarPixelData);
 

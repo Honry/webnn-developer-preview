@@ -4,7 +4,7 @@ import { AutoProcessor, AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@xeno
 //'@xenova/transformers';
 import { get_new_tokens } from "./generation_utils.js";
 import { attention_mask_update, cache_update } from "./post_processing.js";
-import { $, convertToUint16Array, convertToFloat32Array, toHalf } from "../../assets/js/common_utils.js";
+import { $, convertToUint16Array, convertToFloat32Array } from "../../assets/js/common_utils.js";
 import {
     log,
     getModelOPFS,
@@ -197,13 +197,7 @@ export class Whisper {
         const { last_hidden_state } = await this.models["encoder"]["sess"].run({
             input_features: new ort.Tensor(encoder_inputs.type, encoder_inputs.data, encoder_inputs.dims),
         });
-        if (typeof Float16Array != "undefined" && last_hidden_state.cpuData instanceof Float16Array) {
-            last_hidden_state.cpuData = new Uint16Array(
-                last_hidden_state.cpuData.buffer,
-                last_hidden_state.cpuData.byteOffset,
-                last_hidden_state.cpuData.length,
-            );
-        }
+
         // log(`Encoder inference time: ${(performance.now() - start).toFixed(2)}ms`);
         // start = performance.now();
         // -----------------------------------DECODER 1ST INFERENCE-----------------------------------------
@@ -213,9 +207,9 @@ export class Whisper {
         // let tokens = [50258, 50259, 50359, 50364]; // keep timestep token
         let attention_mask;
         if (this.mask_4d) {
-            const min_val = toHalf(-65500);
+            const min_val = -65500;
             const mask_data = [0, min_val, min_val, min_val, 0, 0, min_val, min_val, 0, 0, 0, min_val, 0, 0, 0, 0];
-            attention_mask = new ort.Tensor("float16", new Uint16Array(mask_data), [1, 1, 4, 4]);
+            attention_mask = new ort.Tensor("float16", convertToUint16Array(mask_data), [1, 1, 4, 4]);
         } else {
             attention_mask = new ort.Tensor("int32", new Int32Array(4).fill([1, 1, 1, 1]), [1, 4]);
         }
@@ -232,15 +226,6 @@ export class Whisper {
         // console.log(`Non-KV cache decoder inference time: ${(performance.now() - start).toFixed(2)}ms`);
         // start = performance.now();
 
-        for (const key in decoder_output) {
-            if (typeof Float16Array != "undefined" && decoder_output[key].cpuData instanceof Float16Array) {
-                decoder_output[key].cpuData = new Uint16Array(
-                    decoder_output[key].cpuData.buffer,
-                    decoder_output[key].cpuData.byteOffset,
-                    decoder_output[key].cpuData.length,
-                );
-            }
-        }
         let logits = decoder_output["logits"]["cpuData"];
 
         if (this.dataType == "float16") {
@@ -264,7 +249,7 @@ export class Whisper {
 
         // pad attention mask to max_seq_length
         const mask_data = attention_mask_update(
-            this.mask_4d ? new Uint16Array(4).fill(0) : new BigInt64Array(4).fill(1n),
+            this.mask_4d ? convertToUint16Array([0, 0, 0, 0]) : new BigInt64Array(4).fill(1n),
             0,
             this.max_sequence_length,
             this.num_init_tokens,
@@ -307,15 +292,6 @@ export class Whisper {
             // console.log(`Decoder inference time · Iteration ${i-3}: ${(performance.now() - start).toFixed(2)}ms`);
             // start = performance.now();
             // find out the token with highest probability, cast INT64 to INT32
-            for (const key in decoder_cached_output) {
-                if (typeof Float16Array != "undefined" && decoder_cached_output[key].cpuData instanceof Float16Array) {
-                    decoder_cached_output[key].cpuData = new Uint16Array(
-                        decoder_cached_output[key].cpuData.buffer,
-                        decoder_cached_output[key].cpuData.byteOffset,
-                        decoder_cached_output[key].cpuData.length,
-                    );
-                }
-            }
             let logits = decoder_cached_output["logits"]["cpuData"];
             if (this.dataType == "float16") {
                 logits = convertToFloat32Array(logits);

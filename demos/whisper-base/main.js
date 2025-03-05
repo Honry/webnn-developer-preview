@@ -6,13 +6,7 @@
 //
 
 import { Whisper } from "./whisper.js";
-import {
-    $,
-    getMode,
-    getWebnnStatus,
-    setupORT,
-    showCompatibleChromiumVersion,
-} from "../../assets/js/common_utils.js";
+import { $, getMode, getWebnnStatus, setupORT, showCompatibleChromiumVersion } from "../../assets/js/common_utils.js";
 import { log, logError, concatBuffer, concatBufferArray, logUser } from "./utils.js";
 import VADBuilder, { VADMode, VADEvent } from "./vad/embedded.js";
 import AudioMotionAnalyzer from "./static/js/audioMotion-analyzer.js?min";
@@ -206,7 +200,7 @@ async function process_audio(audio, starttime, idx, pos) {
 
             await process_audio(audio, starttime, idx + kSteps, pos + kMaxAudioLengthInSec);
         } catch (e) {
-            logError(`Error · ${e.message}`);
+            logError(e);
         }
     } else {
         // done with audio buffer
