@@ -25,7 +25,7 @@ const MODELS = {
         id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         file_name: "model.onnx",
         local_path: "models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/",
-        remote_path: "https://huggingface.co/lwanming/TinyLlama-1.1B-Chat-v1.0-onnx/blob/main/model.onnx",
+        remote_path: "https://huggingface.co/lwanming/TinyLlama-1.1B-Chat-v1.0-onnx/resolve/main/",
         eos_token_id: [151645, 151643, 2],
         max_length: 2048,
         num_layers: 22,
@@ -41,7 +41,7 @@ const MODELS = {
         file_name: "model.onnx",
         local_path: "models/microsoft/directml-int4-awq-block-128/",
         remote_path:
-            "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-onnx/tree/main/directml/directml-int4-awq-block-128/",
+            "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-onnx/resolve/main/directml/directml-int4-awq-block-128/",
         eos_token_id: [32000, 32001, 32007],
         max_length: 4096,
         num_layers: 32,
@@ -55,7 +55,7 @@ const MODELS = {
         id: "Qwen/Qwen2-0.5B-Instruct",
         file_name: "model.onnx",
         local_path: "models/Qwen/Qwen2-0.5B-Instruct/",
-        remote_path: "https://huggingface.co/lwanming/Qwen2-0.5B-Instruct-onnx/blob/main/model.onnx",
+        remote_path: "https://huggingface.co/lwanming/Qwen2-0.5B-Instruct-onnx/resolve/main/",
         eos_token_id: [151645, 151643],
         max_length: 32768,
         num_layers: 24,
@@ -71,7 +71,7 @@ const MODELS = {
         file_name: "model.onnx",
         local_path: "models/onnxruntime/DeepSeek-R1-Distill-ONNX/",
         remote_path:
-            "https://huggingface.co/onnxruntime/DeepSeek-R1-Distill-ONNX/tree/main/deepseek-r1-distill-qwen-1.5B/gpu/gpu-int4-rtn-block-32/",
+            "https://huggingface.co/onnxruntime/DeepSeek-R1-Distill-ONNX/resolve/main/deepseek-r1-distill-qwen-1.5B/gpu/gpu-int4-rtn-block-32/",
         eos_token_id: [151643],
         max_length: 131072,
         num_layers: 28,
@@ -267,7 +267,7 @@ function getConfig() {
         show_special: 0,
         csv: 0,
         max_length: 512,
-        local: 1,
+        local: 0,
     };
     let vars = query.split("&");
     let errMsg = "";
@@ -428,8 +428,8 @@ const main = async () => {
 
     try {
         let modelId = config.model.id;
-        if (!config.local && config.remote_id) {
-            modelId = config.remote_id;
+        if (!config.local && config.model.remote_id) {
+            modelId = config.model.remote_id;
         }
         tokenizer = await AutoTokenizer.from_pretrained(modelId);
         await llm.load(config.model, {
