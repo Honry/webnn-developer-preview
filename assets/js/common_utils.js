@@ -8,7 +8,7 @@ const KNOWN_COMPATIBLE_CHROMIUM_VERSION = {
     "segment-anything": "129.0.6617.0",
     "whisper-base": "129.0.6617.0",
     "image-classification": "129.0.6617.0",
-    "chat": "132.0.6831.0",
+    chat: "132.0.6831.0",
 };
 
 export const showCompatibleChromiumVersion = key => {
@@ -146,7 +146,7 @@ const KNOWN_COMPATIBLE_ORT_VERSION = {
         stable: STABLE_ORT_VERSION,
         test: TEST_ORT_VERSION,
     },
-    "chat": {
+    chat: {
         dev: DEV_ORT_VERSION,
         stable: STABLE_ORT_VERSION,
         test: TEST_ORT_VERSION,

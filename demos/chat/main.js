@@ -14,12 +14,12 @@ import {
     setupORT,
     showCompatibleChromiumVersion,
 } from "../../assets/js/common_utils.js";
-import { env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2';
+import { env, AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2";
 import { LLM } from "./llm.js";
 import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
 
 const MODELS = {
-    "llama": {
+    llama: {
         name: "llama",
         desc: "Meta TinyLlama-1.1B-Chat-v1.0",
         id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -33,14 +33,15 @@ const MODELS = {
         head_size: 64,
         system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
     },
-    "phi3": {
+    phi3: {
         name: "phi3",
         desc: "Microsoft Phi-3-mini-4k-instruct-onnx",
         id: "microsoft/directml-int4-awq-block-128",
         remote_id: "microsoft/Phi-3-mini-4k-instruct",
         file_name: "model.onnx",
         local_path: "models/microsoft/directml-int4-awq-block-128/",
-        remote_path: "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-onnx/tree/main/directml/directml-int4-awq-block-128/",
+        remote_path:
+            "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-onnx/tree/main/directml/directml-int4-awq-block-128/",
         eos_token_id: [32000, 32001, 32007],
         max_length: 4096,
         num_layers: 32,
@@ -48,7 +49,7 @@ const MODELS = {
         head_size: 96,
         system_content: "You are a helpful AI assistant.",
     },
-    "qwen2": {
+    qwen2: {
         name: "qwen2",
         desc: "Alibaba Qwen2-0.5B-Instruct",
         id: "Qwen/Qwen2-0.5B-Instruct",
@@ -62,14 +63,15 @@ const MODELS = {
         head_size: 64,
         system_content: "You are a helpful assistant.",
     },
-    "deepseek": {
+    deepseek: {
         name: "deepseek",
         desc: "DeepSeek R1 Distill Qwen 1.5B",
         id: "onnxruntime/DeepSeek-R1-Distill-ONNX",
         remote_id: "onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX", // we actually use tokenizer files from this repo
         file_name: "model.onnx",
         local_path: "models/onnxruntime/DeepSeek-R1-Distill-ONNX/",
-        remote_path: "https://huggingface.co/onnxruntime/DeepSeek-R1-Distill-ONNX/tree/main/deepseek-r1-distill-qwen-1.5B/gpu/gpu-int4-rtn-block-32/",
+        remote_path:
+            "https://huggingface.co/onnxruntime/DeepSeek-R1-Distill-ONNX/tree/main/deepseek-r1-distill-qwen-1.5B/gpu/gpu-int4-rtn-block-32/",
         eos_token_id: [151643],
         max_length: 131072,
         num_layers: 28,
@@ -77,7 +79,7 @@ const MODELS = {
         head_size: 128,
         system_content: "",
     },
-}
+};
 
 let performanceIndicator;
 let userInput, chatHistory;
@@ -309,7 +311,7 @@ const llm = new LLM(config.max_length);
 let messages = [];
 
 if (config.model.system_content) {
-   messages.push({"role": "system", "content": config.model.system_content});
+    messages.push({ role: "system", content: config.model.system_content });
 }
 
 function tokenToText(tokenizer, tokens) {
@@ -320,7 +322,7 @@ function tokenToText(tokenizer, tokens) {
 async function Query(continuation, query, cb) {
     performanceIndicator.innerHTML = "";
     logUser(`Prompt: ${query}`);
-    let userChatTemplate = {"role": "user", "content": query};
+    let userChatTemplate = { role: "user", content: query };
     messages.push(userChatTemplate);
     let inputIds = tokenizer.apply_chat_template(messages, {
         add_generation_prompt: true,
@@ -351,7 +353,7 @@ async function Query(continuation, query, cb) {
             });
         }
     }
-    console.log('messages: ', messages);
+    console.log("messages: ", messages);
     // convert inputIds to BigInt
     inputIds = inputIds.map(num => BigInt(num));
     logUser(`Prompt length: ${inputIds.length}`);
@@ -369,7 +371,7 @@ async function Query(continuation, query, cb) {
     const outputContent = tokenizer.decode(outputTokens, {
         skip_special_tokens: config.show_special != 1,
     });
-    let assistentChatTemplate = {"role": "assistant", "content": outputContent};
+    let assistentChatTemplate = { role: "assistant", content: outputContent };
     messages.push(assistentChatTemplate);
     cleanCache = false;
 

@@ -155,15 +155,12 @@ export class LLM {
             const ortKvDesc = { dataType: this.dtype, dims: this.kvDims };
             const inputMlTensor = await this.mlContext.createTensor(kvDesc);
             for (let i = 0; i < this.numLayers; ++i) {
-                this.feed[`past_key_values.${i}.key`] =
-                    ort.Tensor.fromMLTensor(inputMlTensor, ortKvDesc);
-                this.feed[`past_key_values.${i}.value`] =
-                    ort.Tensor.fromMLTensor(inputMlTensor, ortKvDesc);
+                this.feed[`past_key_values.${i}.key`] = ort.Tensor.fromMLTensor(inputMlTensor, ortKvDesc);
+                this.feed[`past_key_values.${i}.value`] = ort.Tensor.fromMLTensor(inputMlTensor, ortKvDesc);
             }
         } else {
             const kvNumElements = product(this.kvDims);
-            const empty =
-                this.dtype === "float16" ? new Float16Array(kvNumElements) : new Float32Array(kvNumElements);
+            const empty = this.dtype === "float16" ? new Float16Array(kvNumElements) : new Float32Array(kvNumElements);
             for (let i = 0; i < this.numLayers; ++i) {
                 this.feed[`past_key_values.${i}.key`] = new ort.Tensor(this.dtype, empty, this.kvDims);
                 this.feed[`past_key_values.${i}.value`] = new ort.Tensor(this.dtype, empty, this.kvDims);
@@ -185,7 +182,6 @@ export class LLM {
                     } else {
                         t.dispose();
                     }
-
                 }
 
                 this.feed[newName] = outputs[name];
@@ -216,8 +212,8 @@ export class LLM {
     // poor mens argmax
     argmax(t, seqLen = 1) {
         let arr = t.cpuData;
-        if (t.type == 'float16' && !isFloat16ArrayAvailable) {
-            throw new Error('Float16Array is not available on this browser, try to use newer version');
+        if (t.type == "float16" && !isFloat16ArrayAvailable) {
+            throw new Error("Float16Array is not available on this browser, try to use newer version");
         }
 
         let start = t.dims[2] * (seqLen - 1);
@@ -263,13 +259,18 @@ export class LLM {
         }
 
         this.updateKvCache(outputs);
-        while (this.eos.indexOf(lastToken) == -1 &&
-               !this.stop &&
-               this.outputTokens.length <= (this.maxLength - inputIdsLen)) {
+        while (
+            this.eos.indexOf(lastToken) == -1 &&
+            !this.stop &&
+            this.outputTokens.length <= this.maxLength - inputIdsLen
+        ) {
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
             attnMask.push(BigInt(1));
             const attnMaskBuffer = this.paddingInput(attnMask, this.maxLength);
-            this.feed["attention_mask"] = new ort.Tensor("int64", new BigInt64Array(attnMaskBuffer), [1, this.maxLength]);
+            this.feed["attention_mask"] = new ort.Tensor("int64", new BigInt64Array(attnMaskBuffer), [
+                1,
+                this.maxLength,
+            ]);
             this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(startLen)]), [1, 1]);
             if (this.provider == "webnn") {
                 outputs = await this.sess2.run(this.feed);
