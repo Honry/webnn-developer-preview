@@ -2,7 +2,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// An example how to run Phi-3 Mini in onnxruntime-web.
+// An example how to run LLM in onnxruntime-web.
 //
 
 import { log, logUser, logError } from "./utils.js";
@@ -14,9 +14,70 @@ import {
     setupORT,
     showCompatibleChromiumVersion,
 } from "../../assets/js/common_utils.js";
-import { env, AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1";
+import { env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2';
 import { LLM } from "./llm.js";
 import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
+
+const MODELS = {
+    "llama": {
+        name: "llama",
+        desc: "Meta TinyLlama-1.1B-Chat-v1.0",
+        id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        file_name: "model.onnx",
+        local_path: "models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/",
+        remote_path: "https://huggingface.co/lwanming/TinyLlama-1.1B-Chat-v1.0-onnx/blob/main/model.onnx",
+        eos_token_id: [151645, 151643, 2],
+        max_length: 2048,
+        num_layers: 22,
+        kv_num_heads: 4,
+        head_size: 64,
+        system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
+    },
+    "phi3": {
+        name: "phi3",
+        desc: "Microsoft Phi-3-mini-4k-instruct-onnx",
+        id: "microsoft/directml-int4-awq-block-128",
+        remote_id: "microsoft/Phi-3-mini-4k-instruct",
+        file_name: "model.onnx",
+        local_path: "models/microsoft/directml-int4-awq-block-128/",
+        remote_path: "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-onnx/tree/main/directml/directml-int4-awq-block-128/",
+        eos_token_id: [32000, 32001, 32007],
+        max_length: 4096,
+        num_layers: 32,
+        kv_num_heads: 32,
+        head_size: 96,
+        system_content: "You are a helpful AI assistant.",
+    },
+    "qwen2": {
+        name: "qwen2",
+        desc: "Alibaba Qwen2-0.5B-Instruct",
+        id: "Qwen/Qwen2-0.5B-Instruct",
+        file_name: "model.onnx",
+        local_path: "models/Qwen/Qwen2-0.5B-Instruct/",
+        remote_path: "https://huggingface.co/lwanming/Qwen2-0.5B-Instruct-onnx/blob/main/model.onnx",
+        eos_token_id: [151645, 151643],
+        max_length: 32768,
+        num_layers: 24,
+        kv_num_heads: 2,
+        head_size: 64,
+        system_content: "You are a helpful assistant.",
+    },
+    "deepseek": {
+        name: "deepseek",
+        desc: "DeepSeek R1 Distill Qwen 1.5B",
+        id: "onnxruntime/DeepSeek-R1-Distill-ONNX",
+        remote_id: "onnx-community/DeepSeek-R1-Distill-Qwen-1.5B-ONNX", // we actually use tokenizer files from this repo
+        file_name: "model.onnx",
+        local_path: "models/onnxruntime/DeepSeek-R1-Distill-ONNX/",
+        remote_path: "https://huggingface.co/onnxruntime/DeepSeek-R1-Distill-ONNX/tree/main/deepseek-r1-distill-qwen-1.5B/gpu/gpu-int4-rtn-block-32/",
+        eos_token_id: [151643],
+        max_length: 131072,
+        num_layers: 28,
+        kv_num_heads: 2,
+        head_size: 128,
+        system_content: "",
+    },
+}
 
 let performanceIndicator;
 let userInput, chatHistory;
@@ -27,7 +88,7 @@ let device;
 let badge;
 let ctrl = false,
     ready = false,
-    cleanKV = false;
+    cleanCache = false;
 
 const clipboardIcon = `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='currentColor' class='bi bi-clipboard' viewBox='0 0 16 16'>
 <path d='M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z'/>
@@ -156,10 +217,6 @@ async function submitRequest(e) {
     // change autoScroller to keep track of our new responseDiv
     autoScroller.observe(responseDiv);
 
-    // if (continuation) {
-    //   input = context + ' ' + input;
-    // }
-
     Query(continuation, input, word => {
         responseDiv.innerHTML = marked.parse(word);
     })
@@ -187,7 +244,7 @@ async function submitRequest(e) {
 $("#user-input").addEventListener("keydown", async function (e) {
     if (e.ctrlKey && e.key === "Enter") {
         ctrl = true;
-        cleanKV = true;
+        cleanCache = true;
         submitRequest(e);
     } else if (e.key === "Enter") {
         e.preventDefault();
@@ -202,17 +259,16 @@ function getConfig() {
         model: "phi3",
         provider: "webnn",
         devicetype: "gpu",
-        dtype: "float16",
         profiler: 0,
         verbose: 0,
         threads: 1,
         show_special: 0,
         csv: 0,
-        max_seq: 128,
-        max_cache: 256,
+        max_length: 512,
         local: 1,
     };
     let vars = query.split("&");
+    let errMsg = "";
     for (var i = 0; i < vars.length; i++) {
         let pair = vars[i].split("=");
         if (pair[0] in config) {
@@ -223,9 +279,19 @@ function getConfig() {
             } else {
                 config[key] = value;
             }
-        } else if (pair[0].length > 0) {
-            throw new Error("unknown argument: " + pair[0]);
         }
+    }
+    if (MODELS[config.model] !== undefined) {
+        config.model = MODELS[config.model];
+    } else {
+        errMsg = `Unsupported model name: ${config.model}`;
+        logError(errMsg);
+        throw new Error(errMsg);
+    }
+    if (config.max_length < 0 || config.max_length > config.model.context_length) {
+        errMsg = `max_length should not execeed ${config.model.context_length}`;
+        logError(errMsg);
+        throw new Error(errMsg);
     }
     return config;
 }
@@ -239,55 +305,87 @@ env.allowLocalModels = config.local == 1;
 
 let tokenizer;
 
-const llm = new LLM(config.max_seq, config.max_cache, config.dtype);
+const llm = new LLM(config.max_length);
+let messages = [];
 
-function token_to_text(tokenizer, tokens) {
+if (config.model.system_content) {
+   messages.push({"role": "system", "content": config.model.system_content});
+}
+
+function tokenToText(tokenizer, tokens) {
     const txt = tokenizer.decode(tokens, { skip_special_tokens: config.show_special != 1 });
     return txt;
 }
 
 async function Query(continuation, query, cb) {
-    console.log("continuation: ", continuation);
     performanceIndicator.innerHTML = "";
-
     logUser(`Prompt: ${query}`);
-    let prompt = `<|user|>\n${query}<|end|>\n<|assistant|>\n`;
-    if (llm.output_tokens.length == 0 || !continuation || cleanKV) {
-        // clear kv cache
-        await llm.initialize_feed();
-        prompt = `<|system|>\nYou are a friendly assistant.<|end|>\n` + prompt;
-    }
-
-    console.log("prompt: ", prompt);
-
-    const { input_ids } = await tokenizer(prompt, { return_tensor: false, padding: true, truncation: true });
-    console.log("Prompt length: ", input_ids.length);
-    logUser(`Prompt length: ${input_ids.length}`);
-    let time_to_first_token;
-    const start_timer = performance.now();
-    const output_tokens = await llm.generate(input_ids, cleanKV, output_tokens => {
-        if (output_tokens.length == 1) {
-            // time to first token
-            time_to_first_token = (performance.now() - start_timer) / 1000;
-        }
-        cb(token_to_text(tokenizer, output_tokens));
+    let userChatTemplate = {"role": "user", "content": query};
+    messages.push(userChatTemplate);
+    let inputIds = tokenizer.apply_chat_template(messages, {
+        add_generation_prompt: true,
+        tokenize: true,
+        return_tensor: false,
     });
 
-    cleanKV = false;
+    // Clean up
+    if (llm.outputTokens.length == 0 || !continuation || cleanCache || inputIds.length > llm.maxLength) {
+        // Init kv cache
+        await llm.initializeFeed();
+        cleanCache = true;
+        if (inputIds.length > llm.maxLength) {
+            console.log(`Context length exceeds max new tokens, clean up...`);
+        }
+        // Clean up messages if there is cache
+        if (messages.length > 2) {
+            if (messages[0]["role"] == "system") {
+                messages = messages.slice(0, 1);
+            } else {
+                messages = [];
+            }
+            messages.push(userChatTemplate);
+            inputIds = tokenizer.apply_chat_template(messages, {
+                add_generation_prompt: true,
+                tokenize: true,
+                return_tensor: false,
+            });
+        }
+    }
+    console.log('messages: ', messages);
+    // convert inputIds to BigInt
+    inputIds = inputIds.map(num => BigInt(num));
+    logUser(`Prompt length: ${inputIds.length}`);
 
-    const took = (performance.now() - start_timer) / 1000;
-    const time_to_new_tokens = took - time_to_first_token;
-    const seqlen = output_tokens.length;
+    let timeToFirstToken;
+    const startTimer = performance.now();
+    const outputTokens = await llm.generate(inputIds, outputTokens => {
+        if (outputTokens.length == 1) {
+            // time to first token
+            timeToFirstToken = (performance.now() - startTimer) / 1000;
+        }
+        cb(tokenToText(tokenizer, outputTokens));
+    });
+
+    const outputContent = tokenizer.decode(outputTokens, {
+        skip_special_tokens: config.show_special != 1,
+    });
+    let assistentChatTemplate = {"role": "assistant", "content": outputContent};
+    messages.push(assistentChatTemplate);
+    cleanCache = false;
+
+    const took = (performance.now() - startTimer) / 1000;
+    const timeToNewTokens = took - timeToFirstToken;
+    const seqlen = outputTokens.length;
     log(`${seqlen} tokens in ${took.toFixed(2)} sec<br/>
-    Time to first token: ${time_to_first_token.toFixed(2)} sec<br/>
-    New tokens per second: ${((seqlen - 1) / time_to_new_tokens).toFixed(2)} tokens/sec`);
+    Time to first token: ${timeToFirstToken.toFixed(2)} sec<br/>
+    New tokens per second: ${((seqlen - 1) / timeToNewTokens).toFixed(2)} tokens/sec`);
 
     const timeToFirstTokenPerformanceUnit = document.createElement("div");
     timeToFirstTokenPerformanceUnit.className = "tokens-per-second-performance-unit";
     timeToFirstTokenPerformanceUnit.innerHTML = `time to first token`;
     const timeToFirstTokenPerformance = document.createElement("div");
     timeToFirstTokenPerformance.className = "tokens-per-second-performance-data";
-    timeToFirstTokenPerformance.innerHTML = `${time_to_first_token.toFixed(2)}s`;
+    timeToFirstTokenPerformance.innerHTML = `${timeToFirstToken.toFixed(2)}s`;
     const performanceDataTtfs = document.createElement("div");
     performanceDataTtfs.className = "performance-data";
     performanceDataTtfs.setAttribute("title", "Time to first token");
@@ -296,7 +394,7 @@ async function Query(continuation, query, cb) {
 
     const tokensPerSecondPerformance = document.createElement("div");
     tokensPerSecondPerformance.className = "tokens-per-second-performance-data";
-    tokensPerSecondPerformance.innerHTML = `${((seqlen - 1) / time_to_new_tokens).toFixed(2)}`;
+    tokensPerSecondPerformance.innerHTML = `${((seqlen - 1) / timeToNewTokens).toFixed(2)}`;
     const tokensPerSecondPerformanceUnit = document.createElement("div");
     tokensPerSecondPerformanceUnit.className = "tokens-per-second-performance-unit";
     tokensPerSecondPerformanceUnit.innerHTML = `tokens/s`;
@@ -312,8 +410,8 @@ async function Query(continuation, query, cb) {
 }
 
 const main = async () => {
-    await setupORT("phi-3-mini", "dev");
-    showCompatibleChromiumVersion("phi-3-mini");
+    await setupORT("chat", "dev");
+    showCompatibleChromiumVersion("chat");
 
     ort.env.wasm.numThreads = 4;
     ort.env.wasm.simd = true;
@@ -327,24 +425,17 @@ const main = async () => {
     userInput.focus();
 
     try {
-        let model_id;
-        if (
-            location.href.toLowerCase().indexOf("github.io") > -1 ||
-            location.href.toLowerCase().indexOf("huggingface.co") > -1 ||
-            location.href.toLowerCase().indexOf("vercel.app") > -1
-        ) {
-            model_id = "microsoft/Phi-3-mini-4k-instruct";
-        } else {
-            model_id = `microsoft/Phi-3-mini-4k-instruct`;
+        let modelId = config.model.id;
+        if (!config.local && config.remote_id) {
+            modelId = config.remote_id;
         }
-
-        tokenizer = await AutoTokenizer.from_pretrained(model_id);
+        tokenizer = await AutoTokenizer.from_pretrained(modelId);
         await llm.load(config.model, {
             provider: config.provider,
+            devicetype: config.devicetype,
             profiler: config.profiler,
             verbose: config.verbose,
             local: config.local,
-            max_seq: config.max_seq,
         });
         sendButton.disabled = false;
         ready = true;

@@ -55,13 +55,13 @@ export async function getModelOPFS(name, url, updateModel) {
                 loadProgress =
                     onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
                 updateProgressBar(loadProgress.toFixed(2));
-                progressBarLabel.innerHTML = `Loading Phi-3 Mini ONNX data file · ${loadProgress.toFixed(2)}%`;
+                progressBarLabel.innerHTML = `Loading ONNX data file · ${loadProgress.toFixed(2)}%`;
             } else {
                 onnxFetchProgress = 40.0;
                 loadProgress =
                     onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
                 updateProgressBar(loadProgress.toFixed(2));
-                progressBarLabel.innerHTML = `Loading Phi-3 Mini ONNX file · ${loadProgress.toFixed(2)}%`;
+                progressBarLabel.innerHTML = `Loading ONNX file · ${loadProgress.toFixed(2)}%`;
             }
 
             return buffer;
@@ -90,12 +90,12 @@ async function readResponse(name, response) {
             onnxDataFetchProgress = 0.4 * fetchProgress;
             loadProgress = onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
             updateProgressBar(loadProgress.toFixed(2));
-            progressBarLabel.innerHTML = `Loading Phi-3 Mini ONNX data file · ${loadProgress.toFixed(2)}%`;
+            progressBarLabel.innerHTML = `Loading ONNX data file · ${loadProgress.toFixed(2)}%`;
         } else {
             onnxFetchProgress = 0.4 * fetchProgress;
             loadProgress = onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
             updateProgressBar(loadProgress.toFixed(2));
-            progressBarLabel.innerHTML = `Loading Phi-3 Mini ONNX file · ${loadProgress.toFixed(2)}%`;
+            progressBarLabel.innerHTML = `Loading ONNX file · ${loadProgress.toFixed(2)}%`;
         }
 
         if (newLoaded > total) {
