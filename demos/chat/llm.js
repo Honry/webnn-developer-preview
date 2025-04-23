@@ -50,10 +50,10 @@ export class LLM {
         const path = options.local ? model.local_path : model.remote_path;
         const modelFile = model.file_name;
         const modelPath = path + modelFile;
-        const modelBytes = await getModelOPFS(`id_${modelFile}`, modelPath, false);
+        const modelBytes = await getModelOPFS(`id_${model.name}_onnx`, modelPath, false);
         const externalFile = modelFile + ".data";
         const externalDataPath = path + externalFile;
-        const externalDataBytes = await getModelOPFS(`id_${externalFile}`, externalDataPath, false);
+        const externalDataBytes = await getModelOPFS(`id_${model.name}_onnx.data`, externalDataPath, false);
 
         let modelSize = modelBytes.byteLength;
         modelSize += externalDataBytes.byteLength;
@@ -76,7 +76,7 @@ export class LLM {
             case "webgpu":
                 // Bind kv cache outputs to ml-tensor or gpu-buffer
                 sessionOptions.preferredOutputLocation = {};
-                for (let i = 0; i < 32; ++i) {
+                for (let i = 0; i < this.numLayers; ++i) {
                     sessionOptions.preferredOutputLocation[`present.${i}.key`] = locationType;
                     sessionOptions.preferredOutputLocation[`present.${i}.value`] = locationType;
                 }
