@@ -1703,7 +1703,7 @@ var ortWasmThreaded = (() => {
                 "float32-blendable": "14",
                 "clip-distances": "15",
                 "dual-source-blending": "16",
-                md: "17",
+                subgroups: "17",
                 "core-features-and-limits": "18",
                 "chromium-experimental-unorm16-texture-formats": "327692",
                 "chromium-experimental-snorm16-texture-formats": "327693",
