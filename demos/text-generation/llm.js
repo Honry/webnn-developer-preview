@@ -14,6 +14,15 @@ import {
     onnxDataCompileProgress,
 } from "./utils.js";
 
+function product(shape) {
+    if (!Array.isArray(shape)) {
+        return 0; // Keep the non-array case returning 0
+    }
+    // A shape of [] should be 1 as a scalar
+    // No need for special empty array check since reduce handles it
+    return shape.reduce((acc, val) => acc * val, 1);
+}
+
 // Class to handle a large language model on top of onnxruntime-web
 export class LLM {
     provider = "webnn";
@@ -47,10 +56,10 @@ export class LLM {
         const modelFile = model.file_name;
         const modelPath = path + modelFile;
         const modelName = convertToSnakeCase(model.name);
-        const modelBytes = await getModelOPFS(`${modelName}_${modelFile}`, modelPath, false);
+        const modelBytes = await getModelOPFS(`${modelName}_${modelFile}`, modelPath, true);
         const externalFile = modelFile + ".data";
         const externalDataPath = path + externalFile;
-        const externalDataBytes = await getModelOPFS(`${modelName}_${externalFile}`, externalDataPath, false);
+        const externalDataBytes = await getModelOPFS(`${modelName}_${externalFile}`, externalDataPath, true);
 
         let modelSize = modelBytes.byteLength;
         modelSize += externalDataBytes.byteLength;
@@ -157,11 +166,11 @@ export class LLM {
             }
         } else {
             // Initialize kv cache as empty tensors for WebGPU or WASM EP
-            const emptyDims = [1, this.kvNumHeads, 0, this.headSize];
-            const emptyTensor = this.dataType === "float16" ? new Float16Array() : new Float32Array();
+            const numElements = product(this.kvDims);
+            const empty = this.dataType === "float16" ? new Float16Array(numElements) : new Float32Array(numElements);
             for (let i = 0; i < this.numLayers; ++i) {
-                this.feed[`past_key_values.${i}.key`] = new ort.Tensor(this.dataType, emptyTensor, emptyDims);
-                this.feed[`past_key_values.${i}.value`] = new ort.Tensor(this.dataType, emptyTensor, emptyDims);
+                this.feed[`past_key_values.${i}.key`] = new ort.Tensor(this.dataType, empty, this.kvDims);
+                this.feed[`past_key_values.${i}.value`] = new ort.Tensor(this.dataType, empty, this.kvDims);
             }
         }
     }
