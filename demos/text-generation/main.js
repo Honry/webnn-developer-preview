@@ -32,6 +32,7 @@ const MODELS = {
         num_layers: 22,
         kv_num_heads: 4,
         head_size: 64,
+        vocab_size: 32000,
         system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
     },
     phi4mini: {
@@ -40,13 +41,31 @@ const MODELS = {
         id: "microsoft/Phi-4-mini-instruct-onnx",
         remote_id: "microsoft/Phi-4-mini-instruct",
         file_name: "model.onnx",
-        local_path: "models/microsoft/Phi-4-mini-instruct-onnx/",
+        local_path: "models/microsoft/honry-phi4-webgpu-noif-model/",
+        smaller_path: "models/microsoft/honry-phi4-webgpu-noif-model/",
         remote_path: "https://huggingface.co/webnn/Phi-4-mini-instruct-onnx/resolve/main/onnx/",
         eos_token_id: [200020, 199999],
         max_length: 131072,
         num_layers: 32,
         kv_num_heads: 8,
         head_size: 128,
+        vocab_size: 200064,
+        system_content: "You are a helpful AI assistant.",
+    },
+    phi4miniQG: {
+        name: "Phi-4 Mini Instruct with Quantized Gather",
+        desc: "Microsoft Phi-4 Mini Instruct with Quantized Gather",
+        id: "microsoft/Phi-4-mini-instruct-onnx",
+        remote_id: "microsoft/Phi-4-mini-instruct",
+        file_name: "model.onnx",
+        local_path: "models/microsoft/honry-phi4-webgpu-QGather-model/",
+        remote_path: "https://huggingface.co/webnn/Phi-4-mini-instruct-onnx/resolve/main/onnx/",
+        eos_token_id: [200020, 199999],
+        max_length: 131072,
+        num_layers: 32,
+        kv_num_heads: 8,
+        head_size: 128,
+        vocab_size: 200064,
         system_content: "You are a helpful AI assistant.",
     },
     qwen2: {
@@ -61,6 +80,7 @@ const MODELS = {
         num_layers: 24,
         kv_num_heads: 2,
         head_size: 64,
+        vocab_size: 151936,
         system_content: "You are a helpful assistant.",
     },
     deepseekr1: {
@@ -77,6 +97,7 @@ const MODELS = {
         num_layers: 28,
         kv_num_heads: 2,
         head_size: 128,
+        vocab_size: 151936,
         system_content: "",
     },
 };
@@ -259,7 +280,7 @@ $("#user-input").addEventListener("keydown", async function (e) {
 function getConfig() {
     const query = window.location.search.substring(1);
     var config = {
-        model: "phi4mini",
+        model: "phi4miniQG",
         provider: "webnn",
         deviceType: "gpu",
         profiler: 0,
@@ -327,6 +348,9 @@ async function Query(continuation, query, cb) {
     logUser(`Prompt: ${query}`);
     let userChatTemplate = { role: "user", content: query };
     messages.push(userChatTemplate);
+
+    if (provider == "webgpu") messages = [userChatTemplate];
+
     let inputIds = tokenizer.apply_chat_template(messages, {
         add_generation_prompt: true,
         tokenize: true,
@@ -336,7 +360,8 @@ async function Query(continuation, query, cb) {
     // Clean up
     if (llm.outputTokens.length == 0 || !continuation || cleanCache || inputIds.length > llm.maxLength) {
         // Initialize kv cache
-        await llm.initializeFeed();
+        await llm.initialize();
+        llm.startLen = 0;
         cleanCache = true;
         if (inputIds.length > llm.maxLength) {
             console.log(`Context length exceeds max new tokens, clean up...`);
@@ -363,14 +388,20 @@ async function Query(continuation, query, cb) {
 
     let timeToFirstToken;
     const startTimer = performance.now();
-    const outputTokens = await llm.generate(inputIds, outputTokens => {
-        if (outputTokens.length == 1) {
-            // Time to first token
-            timeToFirstToken = (performance.now() - startTimer) / 1000;
-        }
-        cb(tokenToText(tokenizer, outputTokens));
-    });
-
+    const outputTokens = await llm.generate(
+        inputIds,
+        outputTokens => {
+            if (outputTokens.length == 1) {
+                // Time to first token
+                timeToFirstToken = (performance.now() - startTimer) / 1000;
+            }
+            cb(tokenToText(tokenizer, outputTokens));
+        },
+        config.profiler,
+    );
+    if (config.profiler) {
+        create_download_link(cons_out);
+    }
     const outputContent = tokenizer.decode(outputTokens, {
         skip_special_tokens: config.show_special != 1,
     });
@@ -414,6 +445,34 @@ async function Query(continuation, query, cb) {
     performanceIndicator.appendChild(performanceDataTps);
 }
 
+function create_download_link(cons_out) {
+    if (cons_out.length > 0) {
+        let link = document.getElementById("download").childNodes[0];
+        if (link === undefined) {
+            link = document.createElement("a", "download-link");
+            link.download = "profiler.log";
+            link.innerText = "Download";
+            document.getElementById("download").appendChild(link);
+        }
+        const base64 = btoa(cons_out.join("\n"));
+        link.href = `data:application/json;base64,${base64}`;
+    }
+}
+
+const cons_out = [];
+function redirect_output() {
+    console.log = function (message) {
+        try {
+            if (!message.includes("_fence_")) {
+                cons_out.push(message);
+            }
+        } catch (e) {
+            cons_out.push(e.message);
+        }
+    };
+    console.error = console.log;
+}
+
 const main = async () => {
     await setupORT("text-generation", "dev");
     showCompatibleChromiumVersion("text-generation");
@@ -422,6 +481,14 @@ const main = async () => {
     ort.env.wasm.simd = true;
     ort.env.wasm.proxy = false;
     ort.env.logLevel = "warning";
+    ort.env.trace = true;
+    if (config.profiler && config.provider == "webgpu") {
+        redirect_output();
+        ort.env.webgpu.profilingMode = "default";
+        ort.env.webgpu.profiling = {
+            mode: "default",
+        };
+    }
 
     log(`ONNX Runtime Web Execution Provider loaded · ${provider.toLowerCase()}`);
 
@@ -452,7 +519,7 @@ const main = async () => {
 
 const ui = async () => {
     if (!getQueryValue("provider") && !getQueryValue("devicetype")) {
-        location.href = `./?provider=${provider}&devicetype=${deviceType}&model=phi4mini`;
+        location.href = `./?provider=${provider}&devicetype=${deviceType}&model=phi4miniQG`;
         return;
     }
 

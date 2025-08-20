@@ -230,6 +230,21 @@
      stroke: #f35325;
  }
 
+ .models button#phi4miniQG:hover svg path {
+    fill: #f35325;
+}
+
+.models button#phi4miniQG:hover svg circle {
+    stroke: #f35325;
+}
+
+.models #phi4miniQG.active svg path {
+    fill: #f35325;
+}
+
+.models #phi4miniQG.active svg circle {
+    stroke: #f35325;
+}
  .models button#tinyllama svg path {
      stroke: gray;
      stroke-width: 20;
