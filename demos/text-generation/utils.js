@@ -113,6 +113,58 @@ async function readResponse(name, response) {
     return buffer;
 }
 
+// Normalize the buffer size so that it fits the 128-bits (16 bytes) alignment.
+const calcNormalizedBufferSize = size => Math.ceil(Number(size) / 16) * 16;
+
+// Create a new ORT ML Tensor from the given parameters.
+export async function createMlTensor(mlContext, dataType, dims, writable, readable) {
+    const mlTensor = await mlContext.createTensor({ dataType, shape: dims, writable, readable });
+    // eslint-disable-next-line no-undef
+    return ort.Tensor.fromMLTensor(mlTensor, { dataType, dims });
+}
+
+// Create a new ORT GPU Tensor from the given parameters.
+export function createGpuTensor(device, dataType, dims, bufferSize) {
+    const gpuBuffer = device.createBuffer({
+        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
+        size: calcNormalizedBufferSize(bufferSize),
+    });
+    // eslint-disable-next-line no-undef
+    return ort.Tensor.fromGpuBuffer(gpuBuffer, { dataType, dims });
+}
+
+// Download an ML tensor into a pre-allocated target buffer.
+export async function downloadMlTensor(mlContext, mlTensor, targetBuffer) {
+    await mlContext.readTensor(mlTensor, targetBuffer);
+}
+
+// Download a gpu tensor into a pre-allocated target buffer.
+export async function downloadGpuTensor(device, gpuBuffer, originalSize, targetBuffer) {
+    const bufferSize = calcNormalizedBufferSize(originalSize);
+    const gpuReadBuffer = device.createBuffer({
+        size: bufferSize,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+        const commandEncoder = device.createCommandEncoder();
+
+        commandEncoder.copyBufferToBuffer(
+            gpuBuffer /* source buffer */,
+            0 /* source offset */,
+            gpuReadBuffer /* destination buffer */,
+            0 /* destination offset */,
+            bufferSize /* size */,
+        );
+        device.queue.submit([commandEncoder.finish()]);
+        await gpuReadBuffer.mapAsync(GPUMapMode.READ);
+
+        const arrayBuffer = gpuReadBuffer.getMappedRange();
+        targetBuffer.set(new Float16Array(arrayBuffer, 0, originalSize / 2));
+    } finally {
+        gpuReadBuffer.destroy();
+    }
+}
+
 export function log(i) {
     console.log(i);
     if (getMode()) {
