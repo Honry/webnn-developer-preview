@@ -52,6 +52,7 @@ export class LLM {
         this.kvDims = [1, model.kv_num_heads, this.maxLength, model.head_size];
         this.vocabSize = model.vocab_size;
         this.decodeLogitsBuffer = new Float16Array(this.vocabSize);
+        this.useTwoSessions = options.useTwoSessions;
         log(`WebNN EP config: ${model.name} · ${this.provider} · ${this.deviceType}`);
 
         const path = options.local ? model.local_path : model.remote_path;
@@ -85,7 +86,7 @@ export class LLM {
             sessionOptions.logVerbosityLevel = 0;
         }
 
-        if (this.provider == "webnn") {
+        if (this.provider == "webnn" || this.useTwoSessions) {
             sessionOptions.freeDimensionOverrides = {
                 batch_size: 1,
                 sequence_length: this.maxLength,
@@ -105,7 +106,7 @@ export class LLM {
         progressBarLabel.innerHTML = `Prefill session created · ${loadProgress.toFixed(2)}%`;
 
         log("Prefill session created");
-        if (this.provider == "webnn") {
+        if (this.provider == "webnn" || this.useTwoSessions) {
             // Decode process
             sessionOptions.freeDimensionOverrides = {
                 batch_size: 1,
@@ -289,10 +290,11 @@ export class LLM {
     async generate(inputIds, callback) {
         this.outputTokens = [];
         const inputIdsLen = inputIds.length;
-        const attnMaskLen = this.provider == "webnn" ? inputIdsLen : this.startLength + inputIdsLen;
+        const attnMaskLen =
+            this.provider == "webnn" || this.useTwoSessions ? inputIdsLen : this.startLength + inputIdsLen;
         let attnMask = Array.from({ length: attnMaskLen }, () => BigInt(1));
         let positionIds = Array.from({ length: inputIdsLen }, (_, i) =>
-            BigInt(this.provider == "webnn" ? i++ : this.startLength + i++),
+            BigInt(this.provider == "webnn" || this.useTwoSessions ? i++ : this.startLength + i++),
         );
         // Both input_ids and position_ids have shapes of [batch_size, sequence_length].
         // The sequence_length is the length of inputIds, which is dynamic.
@@ -303,7 +305,7 @@ export class LLM {
         // e.g. QWen2.0 supports max_length: 32768, in a matmul of the GQA decomposed op,
         // its input shapes will be [1, 14, 32768, 64] x [1, 14, 64, 32768] = [1, 14, 32768, 32768]
         // which exceeds the 2GB tensor size limitation.
-        if (this.provider == "webnn") {
+        if (this.provider == "webnn" || this.useTwoSessions) {
             inputIds = this.paddingInput(inputIds, this.maxLength);
             positionIds = this.paddingInput(positionIds, this.maxLength);
             attnMask = this.paddingInput(attnMask, this.maxLength);
@@ -315,7 +317,11 @@ export class LLM {
         this.stop = false;
 
         // shape of logits in prefill
-        const prefillLogitsShape = [1, this.provider == "webnn" ? this.maxLength : inputIdsLen, this.vocabSize];
+        const prefillLogitsShape = [
+            1,
+            this.provider == "webnn" || this.useTwoSessions ? this.maxLength : inputIdsLen,
+            this.vocabSize,
+        ];
         const numElementsOfPrefillLogits = prefillLogitsShape.reduce((a, b) => a * b, 1);
         const prefillLogitsBufferSize = numElementsOfPrefillLogits * Float16Array.BYTES_PER_ELEMENT;
         let lastToken = 0;
@@ -354,7 +360,8 @@ export class LLM {
         }
         this.fetches["logits"] = undefined;
 
-        this.startLength = this.provider == "webnn" ? inputIdsLen : this.startLength + inputIdsLen;
+        this.startLength =
+            this.provider == "webnn" || this.useTwoSessions ? inputIdsLen : this.startLength + inputIdsLen;
         this.outputTokens.push(lastToken);
         if (callback) {
             callback(this.outputTokens);
@@ -364,7 +371,7 @@ export class LLM {
         while (this.eos.indexOf(lastToken) == -1 && !this.stop && this.startLength < this.maxLength) {
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
 
-            if (this.provider == "webnn") {
+            if (this.provider == "webnn" || this.useTwoSessions) {
                 attnMask[this.startLength] = 1n;
             } else {
                 attnMask.push(1n);
@@ -396,7 +403,11 @@ export class LLM {
                         decodeLogitsBufferSize,
                     );
                 }
-                outputs = await this.session1.run(this.feed, this.fetches);
+                if (this.useTwoSessions) {
+                    outputs = await this.session2.run(this.feed, this.fetches);
+                } else {
+                    outputs = await this.session1.run(this.feed, this.fetches);
+                }
                 await readBackGpuTensor(
                     this.gpuDevice,
                     this.fetches["logits"].gpuBuffer,

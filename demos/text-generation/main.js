@@ -273,6 +273,7 @@ function getConfig() {
         csv: 0,
         max_length: 512,
         local: 0,
+        useTwoSessions: 0,
     };
     let vars = query.split("&");
     let errorMessage = "";
@@ -332,7 +333,7 @@ async function Query(continuation, query, cb) {
     let userChatTemplate = { role: "user", content: query };
     messages.push(userChatTemplate);
 
-    if (config.provider == "webgpu") {
+    if (config.provider == "webgpu" && !config.useTwoSessions) {
         messages = [userChatTemplate];
     }
 
@@ -457,6 +458,7 @@ const main = async () => {
             profiler: config.profiler,
             verbose: config.verbose,
             local: config.local,
+            useTwoSessions: config.useTwoSessions,
         });
         sendButton.disabled = false;
         ready = true;
