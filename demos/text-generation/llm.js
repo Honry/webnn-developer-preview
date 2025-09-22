@@ -114,6 +114,7 @@ export class LLM {
                 total_sequence_length: this.maxLength,
                 past_sequence_length: this.maxLength,
             };
+            // if (this.provider == "webgpu") sessionOptions.freeDimensionOverrides = {};
             log("Create session for decode process");
             console.log("Create session 2 with option: ");
             console.log({ ...sessionOptions });
