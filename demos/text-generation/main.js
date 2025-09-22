@@ -380,13 +380,21 @@ async function Query(continuation, query, cb) {
 
     let timeToFirstToken;
     const startTimer = performance.now();
-    const outputTokens = await llm.generate(inputIds, outputTokens => {
-        if (outputTokens.length == 1) {
-            // Time to first token
-            timeToFirstToken = (performance.now() - startTimer) / 1000;
-        }
-        cb(tokenToText(tokenizer, outputTokens));
-    });
+    const outputTokens = await llm.generate(
+        inputIds,
+        outputTokens => {
+            if (outputTokens.length == 1) {
+                // Time to first token
+                timeToFirstToken = (performance.now() - startTimer) / 1000;
+            }
+            cb(tokenToText(tokenizer, outputTokens));
+        },
+        config.profiler,
+    );
+
+    if (config.profiler) {
+        create_download_link(cons_out);
+    }
 
     const outputContent = tokenizer.decode(outputTokens, {
         skip_special_tokens: config.show_special != 1,
@@ -431,6 +439,34 @@ async function Query(continuation, query, cb) {
     performanceIndicator.appendChild(performanceDataTps);
 }
 
+function create_download_link(cons_out) {
+    if (cons_out.length > 0) {
+        let link = document.getElementById("download").childNodes[0];
+        if (link === undefined) {
+            link = document.createElement("a", "download-link");
+            link.download = "profiler.log";
+            link.innerText = "Download";
+            document.getElementById("download").appendChild(link);
+        }
+        const base64 = btoa(cons_out.join("\n"));
+        link.href = `data:application/json;base64,${base64}`;
+    }
+}
+
+const cons_out = [];
+function redirect_output() {
+    console.log = function (message) {
+        try {
+            if (!message.includes("_fence_")) {
+                cons_out.push(message);
+            }
+        } catch (e) {
+            cons_out.push(e.message);
+        }
+    };
+    console.error = console.log;
+}
+
 const main = async () => {
     await setupORT("text-generation", "dev");
     showCompatibleChromiumVersion("text-generation");
@@ -439,6 +475,14 @@ const main = async () => {
     ort.env.wasm.simd = true;
     ort.env.wasm.proxy = false;
     ort.env.logLevel = "warning";
+    if (config.profiler && config.provider == "webgpu") {
+        ort.env.trace = true;
+        redirect_output();
+        ort.env.webgpu.profilingMode = "default";
+        ort.env.webgpu.profiling = {
+            mode: "default",
+        };
+    }
 
     log(`ONNX Runtime Web Execution Provider loaded · ${provider.toLowerCase()}`);
 

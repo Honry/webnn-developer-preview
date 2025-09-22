@@ -45,6 +45,7 @@ export class LLM {
         this.provider = options.provider;
         this.deviceType = options.deviceType;
         const verbose = options.verbose;
+        const profiler = options.profiler;
         this.eos = model.eos_token_id; // End of sentence token ids
         this.numLayers = model.num_layers;
         this.kvNumHeads = model.kv_num_heads;
@@ -85,7 +86,9 @@ export class LLM {
             sessionOptions.logSeverityLevel = 0;
             sessionOptions.logVerbosityLevel = 0;
         }
-
+        if (profiler && this.provider == "webgpu") {
+            sessionOptions.enableProfiling = true;
+        }
         if (this.provider == "webnn" || this.useTwoSessions) {
             sessionOptions.freeDimensionOverrides = {
                 batch_size: 1,
@@ -288,7 +291,7 @@ export class LLM {
     }
 
     // Prefill prompt and generate tokens, greedy search only
-    async generate(inputIds, callback) {
+    async generate(inputIds, callback, profiler = false) {
         this.outputTokens = [];
         const inputIdsLen = inputIds.length;
         const attnMaskLen =
@@ -437,6 +440,12 @@ export class LLM {
             this.fetches["logits"].gpuBuffer.destroy();
         }
 
+        if (this.provider == "webgpu" && profiler) {
+            await this.session1.endProfiling();
+            if (this.session2) {
+                await this.session2.endProfiling();
+            }
+        }
         return this.outputTokens;
     }
 
