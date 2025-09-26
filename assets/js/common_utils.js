@@ -190,6 +190,9 @@ const loadScriptWithMessage = async version => {
         if (version === "test") {
             await loadScript("onnxruntime-web", "../../assets/dist/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
+        } else if (version === "test-debug") {
+            await loadScript("onnxruntime-web", "../../assets/dist-debug/ort.webgpu.min.js");
+            return "ONNX Runtime Web: Test version";
         } else {
             if (version === "latest") {
                 version = await getLatestOrtWebDevVersion();

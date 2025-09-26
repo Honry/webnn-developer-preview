@@ -267,6 +267,7 @@ function getConfig() {
         provider: "webnn",
         deviceType: "gpu",
         profiler: 0,
+        trace: 0,
         verbose: 0,
         threads: 1,
         show_special: 0,
@@ -390,6 +391,7 @@ async function Query(continuation, query, cb) {
             cb(tokenToText(tokenizer, outputTokens));
         },
         config.profiler,
+        config.trace,
     );
 
     if (config.profiler) {
@@ -475,6 +477,9 @@ const main = async () => {
     ort.env.wasm.simd = true;
     ort.env.wasm.proxy = false;
     ort.env.logLevel = "warning";
+    if (config.trace) {
+        ort.env.trace = true;
+    }
     if (config.profiler && config.provider == "webgpu") {
         ort.env.trace = true;
         redirect_output();
@@ -490,26 +495,26 @@ const main = async () => {
     stopButton.addEventListener("click", submitRequest);
     userInput.focus();
 
-    try {
-        let modelId = config.model.id;
-        if (!config.local && config.model.remote_id) {
-            modelId = config.model.remote_id;
-        }
-        tokenizer = await AutoTokenizer.from_pretrained(modelId);
-        await llm.load(config.model, {
-            provider: config.provider,
-            deviceType: config.deviceType,
-            profiler: config.profiler,
-            verbose: config.verbose,
-            local: config.local,
-            useTwoSessions: config.useTwoSessions,
-        });
-        sendButton.disabled = false;
-        ready = true;
-        log("Ready to type your message ...");
-    } catch (error) {
-        logError(`[Error] ${error}`);
+    // try {
+    let modelId = config.model.id;
+    if (!config.local && config.model.remote_id) {
+        modelId = config.model.remote_id;
     }
+    tokenizer = await AutoTokenizer.from_pretrained(modelId);
+    await llm.load(config.model, {
+        provider: config.provider,
+        deviceType: config.deviceType,
+        profiler: config.profiler,
+        verbose: config.verbose,
+        local: config.local,
+        useTwoSessions: config.useTwoSessions,
+    });
+    sendButton.disabled = false;
+    ready = true;
+    log("Ready to type your message ...");
+    // } catch (error) {
+    //     logError(`[Error] ${error}`);
+    // }
 };
 
 const ui = async () => {

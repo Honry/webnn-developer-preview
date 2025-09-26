@@ -218,13 +218,15 @@ export class LLM {
                     bufferSize,
                 );
 
-                this.fetches[`present.${i}.key`] = createGpuTensor(this.gpuDevice, "float16", this.kvDims, bufferSize);
-                this.fetches[`present.${i}.value`] = createGpuTensor(
-                    this.gpuDevice,
-                    "float16",
-                    this.kvDims,
-                    bufferSize,
-                );
+                this.fetches[`present.${i}.key`] = this.feed[`past_key_values.${i}.key`];
+                this.fetches[`present.${i}.value`] = this.feed[`past_key_values.${i}.value`];
+                // this.fetches[`present.${i}.key`] = createGpuTensor(this.gpuDevice, "float16", this.kvDims, bufferSize);
+                // this.fetches[`present.${i}.value`] = createGpuTensor(
+                //     this.gpuDevice,
+                //     "float16",
+                //     this.kvDims,
+                //     bufferSize,
+                // );
             }
         } else {
             // Initialize kv cache as empty tensors for WASM EP
@@ -291,7 +293,10 @@ export class LLM {
     }
 
     // Prefill prompt and generate tokens, greedy search only
-    async generate(inputIds, callback, profiler = false) {
+    async generate(inputIds, callback, profiler = false, trace = false) {
+        if (trace) {
+            console.time("generate(): prefill prepare inputs");
+        }
         this.outputTokens = [];
         const inputIdsLen = inputIds.length;
         const attnMaskLen =
@@ -339,7 +344,15 @@ export class LLM {
                 prefillLogitsBufferSize,
             );
         }
+        if (trace) {
+            console.timeEnd("generate(): prefill prepare inputs");
+            console.time("generate(): prefill session run()");
+        }
         let outputs = await this.session1.run(this.feed, this.fetches);
+        if (trace) {
+            console.timeEnd("generate(): prefill session run()");
+            console.time("generate(): prefill readBack + gen token");
+        }
         this.prefillLogitsBuffer = new Float16Array(numElementsOfPrefillLogits);
         if (this.provider == "webnn") {
             await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.prefillLogitsBuffer);
@@ -370,9 +383,18 @@ export class LLM {
         if (callback) {
             callback(this.outputTokens);
         }
-
+        if (trace) {
+            console.timeEnd("generate(): prefill readBack + gen token");
+            console.time("generate(): decode first kv update");
+        }
         this.updateKvCache(outputs);
+        if (trace) {
+            console.timeEnd("generate(): decode first kv update");
+        }
         while (this.eos.indexOf(lastToken) == -1 && !this.stop && this.startLength < this.maxLength) {
+            if (trace) {
+                console.time("generate(): decode prepare inputs");
+            }
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
 
             if (this.provider == "webnn" || this.useTwoSessions) {
@@ -394,7 +416,15 @@ export class LLM {
                         true,
                     );
                 }
+                if (trace) {
+                    console.timeEnd("generate(): decode prepare inputs");
+                    console.time("generate(): decode session run()");
+                }
                 outputs = await this.session2.run(this.feed, this.fetches);
+                if (trace) {
+                    console.timeEnd("generate(): decode session run()");
+                    console.time("generate(): decode readBack + gen token");
+                }
                 await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.decodeLogitsBuffer);
             } else if (this.provider == "webgpu") {
                 const decodeLogitsBufferSize = this.vocabSize * Float16Array.BYTES_PER_ELEMENT;
@@ -407,10 +437,18 @@ export class LLM {
                         decodeLogitsBufferSize,
                     );
                 }
+                if (trace) {
+                    console.timeEnd("generate(): decode prepare inputs");
+                    console.time("generate(): decode session run()");
+                }
                 if (this.useTwoSessions) {
                     outputs = await this.session2.run(this.feed, this.fetches);
                 } else {
                     outputs = await this.session1.run(this.feed, this.fetches);
+                }
+                if (trace) {
+                    console.timeEnd("generate(): decode session run()");
+                    console.time("generate(): decode readBack + gen token");
                 }
                 await readBackGpuTensor(
                     this.gpuDevice,
@@ -419,7 +457,15 @@ export class LLM {
                     this.decodeLogitsBuffer,
                 );
             } else {
+                if (trace) {
+                    console.timeEnd("generate(): decode prepare inputs");
+                    console.time("generate(): decode session run()");
+                }
                 outputs = await this.session1.run(this.feed, this.fetches);
+                if (trace) {
+                    console.timeEnd("generate(): decode session run()");
+                    console.time("generate(): decode readBack + gen token");
+                }
                 this.decodeLogitsBuffer = outputs["logits"].cpuData;
             }
 
@@ -429,7 +475,14 @@ export class LLM {
             if (callback) {
                 callback(this.outputTokens);
             }
+            if (trace) {
+                console.timeEnd("generate(): decode readBack + gen token");
+                console.time("generate(): decode kv update");
+            }
             this.updateKvCache(outputs);
+            if (trace) {
+                console.timeEnd("generate(): decode kv update");
+            }
             this.startLength++;
         }
 
