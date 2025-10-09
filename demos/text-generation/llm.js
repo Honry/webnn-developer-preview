@@ -184,7 +184,8 @@ export class LLM {
                     false,
                     false,
                 );
-
+                // this.fetches[`present.${i}.key`] = this.feed[`past_key_values.${i}.key`];
+                // this.fetches[`present.${i}.value`] = this.feed[`past_key_values.${i}.value`];
                 this.fetches[`present.${i}.key`] = await createMlTensor(
                     this.mlContext,
                     "float16",
@@ -351,7 +352,7 @@ export class LLM {
         let outputs = await this.session1.run(this.feed, this.fetches);
         if (trace) {
             console.timeEnd("generate(): prefill session run()");
-            console.time("generate(): prefill readBack + gen token");
+            console.time("generate(): prefill readBack");
         }
         this.prefillLogitsBuffer = new Float16Array(numElementsOfPrefillLogits);
         if (this.provider == "webnn") {
@@ -366,7 +367,10 @@ export class LLM {
         } else {
             this.prefillLogitsBuffer = outputs["logits"].cpuData;
         }
-
+        if (trace) {
+            console.timeEnd("generate(): prefill readBack");
+            console.time("generate(): prefill gen token");
+        }
         lastToken = this.argmax(this.prefillLogitsBuffer, inputIdsLen, this.vocabSize);
 
         // Clean up the logits tensor after prefill
@@ -384,7 +388,7 @@ export class LLM {
             callback(this.outputTokens);
         }
         if (trace) {
-            console.timeEnd("generate(): prefill readBack + gen token");
+            console.timeEnd("generate(): prefill gen token");
             console.time("generate(): decode first kv update");
         }
         this.updateKvCache(outputs);
@@ -395,13 +399,14 @@ export class LLM {
             if (trace) {
                 console.time("generate(): decode prepare inputs");
             }
-            this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
 
             if (this.provider == "webnn" || this.useTwoSessions) {
                 attnMask[this.startLength] = 1n;
             } else {
                 attnMask.push(1n);
             }
+
+            this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
             this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
             this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(this.startLength)]), [1, 1]);
 
@@ -423,7 +428,7 @@ export class LLM {
                 outputs = await this.session2.run(this.feed, this.fetches);
                 if (trace) {
                     console.timeEnd("generate(): decode session run()");
-                    console.time("generate(): decode readBack + gen token");
+                    console.time("generate(): decode readBack");
                 }
                 await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.decodeLogitsBuffer);
             } else if (this.provider == "webgpu") {
@@ -448,7 +453,7 @@ export class LLM {
                 }
                 if (trace) {
                     console.timeEnd("generate(): decode session run()");
-                    console.time("generate(): decode readBack + gen token");
+                    console.time("generate(): decode readBack");
                 }
                 await readBackGpuTensor(
                     this.gpuDevice,
@@ -464,11 +469,14 @@ export class LLM {
                 outputs = await this.session1.run(this.feed, this.fetches);
                 if (trace) {
                     console.timeEnd("generate(): decode session run()");
-                    console.time("generate(): decode readBack + gen token");
+                    console.time("generate(): decode readBack");
                 }
                 this.decodeLogitsBuffer = outputs["logits"].cpuData;
             }
-
+            if (trace) {
+                console.timeEnd("generate(): decode readBack");
+                console.time("generate(): decode gen token");
+            }
             lastToken = this.argmax(this.decodeLogitsBuffer, 1, this.vocabSize);
 
             this.outputTokens.push(lastToken);
@@ -476,7 +484,7 @@ export class LLM {
                 callback(this.outputTokens);
             }
             if (trace) {
-                console.timeEnd("generate(): decode readBack + gen token");
+                console.timeEnd("generate(): decode gen token");
                 console.time("generate(): decode kv update");
             }
             this.updateKvCache(outputs);
