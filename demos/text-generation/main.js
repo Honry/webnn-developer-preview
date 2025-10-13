@@ -275,6 +275,7 @@ function getConfig() {
         max_length: 512,
         local: 0,
         useTwoSessions: 0,
+        useSameTensor: 0,
     };
     let vars = query.split("&");
     let errorMessage = "";
@@ -353,7 +354,7 @@ async function Query(continuation, query, cb) {
         llm.startLength >= llm.maxLength
     ) {
         // Initialize kv cache
-        await llm.initialize();
+        await llm.initialize(config.useSameTensor);
         llm.startLength = 0;
         cleanCache = true;
         if (inputIds.length > llm.maxLength) {
@@ -387,6 +388,7 @@ async function Query(continuation, query, cb) {
             if (outputTokens.length == 1) {
                 // Time to first token
                 timeToFirstToken = (performance.now() - startTimer) / 1000;
+                console.time("Decoding Duration");
             }
             cb(tokenToText(tokenizer, outputTokens));
         },
@@ -407,6 +409,7 @@ async function Query(continuation, query, cb) {
 
     const took = (performance.now() - startTimer) / 1000;
     const timeToNewTokens = took - timeToFirstToken;
+    console.timeEnd("Decoding Duration");
     const sequenceLength = outputTokens.length;
     log(`${sequenceLength} tokens in ${took.toFixed(2)} sec<br/>
     Time to first token: ${timeToFirstToken.toFixed(2)} sec<br/>
@@ -508,6 +511,7 @@ const main = async () => {
         verbose: config.verbose,
         local: config.local,
         useTwoSessions: config.useTwoSessions,
+        useSameTensor: config.useSameTensor,
     });
     sendButton.disabled = false;
     ready = true;

@@ -54,6 +54,7 @@ export class LLM {
         this.vocabSize = model.vocab_size;
         this.decodeLogitsBuffer = new Float16Array(this.vocabSize);
         this.useTwoSessions = options.useTwoSessions;
+        this.useSameTensor = options.useSameTensor;
         log(`WebNN EP config: ${model.name} · ${this.provider} · ${this.deviceType}`);
 
         const path = options.local ? model.local_path : model.remote_path;
@@ -138,7 +139,7 @@ export class LLM {
         progressBarLabel.innerHTML = "100%";
 
         if (!flag) {
-            this.initialize();
+            this.initialize(this.useSameTensor);
         }
     }
 
@@ -161,7 +162,7 @@ export class LLM {
     }
 
     // Initialize key value caches
-    async initialize() {
+    async initialize(useSameTensor = false) {
         // Dispose previous tensors
         this.disposeTensors(this.feed);
         this.disposeTensors(this.fetches);
@@ -184,22 +185,26 @@ export class LLM {
                     false,
                     false,
                 );
-                // this.fetches[`present.${i}.key`] = this.feed[`past_key_values.${i}.key`];
-                // this.fetches[`present.${i}.value`] = this.feed[`past_key_values.${i}.value`];
-                this.fetches[`present.${i}.key`] = await createMlTensor(
-                    this.mlContext,
-                    "float16",
-                    this.kvDims,
-                    false,
-                    false,
-                );
-                this.fetches[`present.${i}.value`] = await createMlTensor(
-                    this.mlContext,
-                    "float16",
-                    this.kvDims,
-                    false,
-                    false,
-                );
+
+                if (useSameTensor) {
+                    this.fetches[`present.${i}.key`] = this.feed[`past_key_values.${i}.key`];
+                    this.fetches[`present.${i}.value`] = this.feed[`past_key_values.${i}.value`];
+                } else {
+                    this.fetches[`present.${i}.key`] = await createMlTensor(
+                        this.mlContext,
+                        "float16",
+                        this.kvDims,
+                        false,
+                        false,
+                    );
+                    this.fetches[`present.${i}.value`] = await createMlTensor(
+                        this.mlContext,
+                        "float16",
+                        this.kvDims,
+                        false,
+                        false,
+                    );
+                }
             }
         } else if (this.provider == "webgpu") {
             // Pre-allocate kv cache gpu-buffer
@@ -219,15 +224,23 @@ export class LLM {
                     bufferSize,
                 );
 
-                this.fetches[`present.${i}.key`] = this.feed[`past_key_values.${i}.key`];
-                this.fetches[`present.${i}.value`] = this.feed[`past_key_values.${i}.value`];
-                // this.fetches[`present.${i}.key`] = createGpuTensor(this.gpuDevice, "float16", this.kvDims, bufferSize);
-                // this.fetches[`present.${i}.value`] = createGpuTensor(
-                //     this.gpuDevice,
-                //     "float16",
-                //     this.kvDims,
-                //     bufferSize,
-                // );
+                if (useSameTensor) {
+                    this.fetches[`present.${i}.key`] = this.feed[`past_key_values.${i}.key`];
+                    this.fetches[`present.${i}.value`] = this.feed[`past_key_values.${i}.value`];
+                } else {
+                    this.fetches[`present.${i}.key`] = createGpuTensor(
+                        this.gpuDevice,
+                        "float16",
+                        this.kvDims,
+                        bufferSize,
+                    );
+                    this.fetches[`present.${i}.value`] = createGpuTensor(
+                        this.gpuDevice,
+                        "float16",
+                        this.kvDims,
+                        bufferSize,
+                    );
+                }
             }
         } else {
             // Initialize kv cache as empty tensors for WASM EP
@@ -242,6 +255,7 @@ export class LLM {
 
     // Update key value cache
     updateKvCache(outputs) {
+        if (this.useSameTensor) return;
         for (const name in outputs) {
             if (name.includes("present.")) {
                 let newName = name.replace(name.split(".")[0], "past_key_values");
