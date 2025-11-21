@@ -185,22 +185,23 @@ const getLatestOrtWebDevVersion = async () => {
     }
 };
 
-const loadScriptWithMessage = async version => {
+const loadScriptWithMessage = async (version, useJSPI) => {
     try {
+        const ort_entry = useJSPI ? "ort.jspi.min.js" : "ort.webgpu.min.js";
         if (version === "test") {
-            await loadScript("onnxruntime-web", "../../assets/dist/ort.webgpu.min.js");
+            await loadScript("onnxruntime-web", `../../assets/dist/${ort_entry}`);
             return "ONNX Runtime Web: Test version";
         } else if (version === "test-gqa") {
-            await loadScript("onnxruntime-web", "../../assets/dist-gqa/ort.webgpu.min.js");
+            await loadScript("onnxruntime-web", `../../assets/dist-gqa/${ort_entry}`);
             return "ONNX Runtime Web: Test version";
         } else if (version === "test-debug") {
-            await loadScript("onnxruntime-web", "../../assets/dist-debug/ort.webgpu.min.js");
+            await loadScript("onnxruntime-web", `../../assets/dist-debug/${ort_entry}`);
             return "ONNX Runtime Web: Test version";
         } else {
             if (version === "latest") {
                 version = await getLatestOrtWebDevVersion();
             }
-            await loadScript("onnxruntime-web", `${ORT_CDN_URL}${version}/dist/ort.jspi.min.js`);
+            await loadScript("onnxruntime-web", `${ORT_CDN_URL}${version}/dist/${ort_entry}`);
             return `ONNX Runtime Web: <a href="${ortLink(version)}">${version}</a>`;
         }
     } catch (error) {
@@ -214,11 +215,12 @@ export const setupORT = async (key, branch) => {
     const ortVersionElement = $("#ortversion");
     removeElement("onnxruntime-web");
     const queryOrt = getQueryValue("ort")?.toLowerCase();
+    const useJSPI = getQueryValue("useJSPI")?.toLowerCase() == "1";
     let versionHtml;
     if (queryOrt) {
-        versionHtml = await loadScriptWithMessage(queryOrt);
+        versionHtml = await loadScriptWithMessage(queryOrt, useJSPI);
     } else {
-        versionHtml = await loadScriptWithMessage(version);
+        versionHtml = await loadScriptWithMessage(version, useJSPI);
     }
     ortVersionElement.innerHTML = versionHtml;
 };
