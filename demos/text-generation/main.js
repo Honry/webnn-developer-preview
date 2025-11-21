@@ -41,7 +41,7 @@ const MODELS = {
         id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         file_name: "model.onnx",
         local_path: "models/TinyLlama/TinyLlama-1.1B-Chat-v1.0-webgpu-v2/",
-        remote_path: "https://huggingface.co/webnn/TinyLlama-1.1B-Chat-v1.0-webgpu-v2/resolve/main/",
+        remote_path: "https://huggingface.co/lwanming/TinyLlama-1.1B-Chat-v1.0-webgpu-v2/resolve/main/",
         eos_token_id: [151645, 151643, 2],
         max_length: 2048,
         num_layers: 22,
