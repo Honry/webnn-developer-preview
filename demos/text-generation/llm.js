@@ -206,6 +206,16 @@ export class LLM {
                     );
                 }
             }
+
+            this.inputIdsMlTensor = await createMlTensor(this.mlContext, "int64", [1, this.maxLength], true, false);
+            this.attentionMaskMlTensor = await createMlTensor(
+                this.mlContext,
+                "int64",
+                [1, this.maxLength],
+                true,
+                false,
+            );
+            this.positionIdsMlTensor = await createMlTensor(this.mlContext, "int64", [1, this.maxLength], true, false);
         } else if (this.provider == "webgpu") {
             // Pre-allocate kv cache gpu-buffer
             const numElements = this.kvDims.reduce((a, b) => a * b, 1);
@@ -335,9 +345,21 @@ export class LLM {
             attnMask = this.paddingInput(attnMask, this.maxLength);
         }
 
-        this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIds.length]);
-        this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
-        this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [1, positionIds.length]);
+        if (this.provider == "webnn") {
+            this.mlContext.writeTensor(this.inputIdsMlTensor.mlTensor, BigInt64Array.from(inputIds));
+            this.mlContext.writeTensor(this.attentionMaskMlTensor.mlTensor, BigInt64Array.from(attnMask));
+            this.mlContext.writeTensor(this.positionIdsMlTensor.mlTensor, BigInt64Array.from(positionIds));
+            this.feed["input_ids"] = this.inputIdsMlTensor;
+            this.feed["attention_mask"] = this.attentionMaskMlTensor;
+            this.feed["position_ids"] = this.positionIdsMlTensor;
+        } else {
+            this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIds.length]);
+            this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
+            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [
+                1,
+                positionIds.length,
+            ]);
+        }
         this.stop = false;
 
         // shape of logits in prefill
@@ -421,8 +443,15 @@ export class LLM {
             }
 
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
-            this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
             this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(this.startLength)]), [1, 1]);
+            if (this.provider == "webnn") {
+                this.mlContext.writeTensor(this.feed["attention_mask"].mlTensor, BigInt64Array.from(attnMask));
+            } else {
+                this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [
+                    1,
+                    attnMask.length,
+                ]);
+            }
 
             if (this.provider == "webnn") {
                 // Pre-allocate logits ml-tensor once
@@ -528,7 +557,15 @@ export class LLM {
         try {
             this.disposeTensors(this.feed);
             this.disposeTensors(this.fetches);
-
+            if (this.inputIdsMlTensor) {
+                this.inputIdsMlTensor.mlTensor.destroy();
+            }
+            if (this.attentionMaskMlTensor) {
+                this.attentionMaskMlTensor.mlTensor.destroy();
+            }
+            if (this.positionIdsMlTensor) {
+                this.positionIdsMlTensor.mlTensor.destroy();
+            }
             this.feed = {};
             this.fetches = {};
             await this.session1.release();

@@ -190,6 +190,9 @@ const loadScriptWithMessage = async version => {
         if (version === "test") {
             await loadScript("onnxruntime-web", "../../assets/dist/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
+        } else if (version === "test-gqa") {
+            await loadScript("onnxruntime-web", "../../assets/dist-gqa/ort.webgpu.min.js");
+            return "ONNX Runtime Web: Test version";
         } else if (version === "test-debug") {
             await loadScript("onnxruntime-web", "../../assets/dist-debug/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
@@ -197,7 +200,7 @@ const loadScriptWithMessage = async version => {
             if (version === "latest") {
                 version = await getLatestOrtWebDevVersion();
             }
-            await loadScript("onnxruntime-web", `${ORT_CDN_URL}${version}/dist/ort.webgpu.min.js`);
+            await loadScript("onnxruntime-web", `${ORT_CDN_URL}${version}/dist/ort.jspi.min.js`);
             return `ONNX Runtime Web: <a href="${ortLink(version)}">${version}</a>`;
         }
     } catch (error) {

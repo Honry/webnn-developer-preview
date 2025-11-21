@@ -35,6 +35,21 @@ const MODELS = {
         vocab_size: 32000,
         system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
     },
+    tinyllama_v2: {
+        name: "TinyLlama 1.1B Chat v1.0",
+        desc: "Meta TinyLlama-1.1B-Chat-v1.0",
+        id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        file_name: "model.onnx",
+        local_path: "models/TinyLlama/TinyLlama-1.1B-Chat-v1.0-webgpu-v2/",
+        remote_path: "https://huggingface.co/webnn/TinyLlama-1.1B-Chat-v1.0-webgpu-v2/resolve/main/",
+        eos_token_id: [151645, 151643, 2],
+        max_length: 2048,
+        num_layers: 22,
+        kv_num_heads: 4,
+        head_size: 64,
+        vocab_size: 32000,
+        system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
+    },
     phi4mini: {
         name: "Phi-4 Mini Instruct",
         desc: "Microsoft Phi-4 Mini Instruct",
@@ -275,7 +290,7 @@ function getConfig() {
         max_length: 512,
         local: 0,
         useTwoSessions: 0,
-        useSameTensor: 0,
+        useSameTensor: 1,
     };
     let vars = query.split("&");
     let errorMessage = "";
@@ -498,27 +513,27 @@ const main = async () => {
     stopButton.addEventListener("click", submitRequest);
     userInput.focus();
 
-    // try {
-    let modelId = config.model.id;
-    if (!config.local && config.model.remote_id) {
-        modelId = config.model.remote_id;
+    try {
+        let modelId = config.model.id;
+        if (!config.local && config.model.remote_id) {
+            modelId = config.model.remote_id;
+        }
+        tokenizer = await AutoTokenizer.from_pretrained(modelId);
+        await llm.load(config.model, {
+            provider: config.provider,
+            deviceType: config.deviceType,
+            profiler: config.profiler,
+            verbose: config.verbose,
+            local: config.local,
+            useTwoSessions: config.useTwoSessions,
+            useSameTensor: config.useSameTensor,
+        });
+        sendButton.disabled = false;
+        ready = true;
+        log("Ready to type your message ...");
+    } catch (error) {
+        logError(`[Error] ${error}`);
     }
-    tokenizer = await AutoTokenizer.from_pretrained(modelId);
-    await llm.load(config.model, {
-        provider: config.provider,
-        deviceType: config.deviceType,
-        profiler: config.profiler,
-        verbose: config.verbose,
-        local: config.local,
-        useTwoSessions: config.useTwoSessions,
-        useSameTensor: config.useSameTensor,
-    });
-    sendButton.disabled = false;
-    ready = true;
-    log("Ready to type your message ...");
-    // } catch (error) {
-    //     logError(`[Error] ${error}`);
-    // }
 };
 
 const ui = async () => {
