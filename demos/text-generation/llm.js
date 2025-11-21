@@ -55,6 +55,7 @@ export class LLM {
         this.decodeLogitsBuffer = new Float16Array(this.vocabSize);
         this.useTwoSessions = options.useTwoSessions;
         this.useSameTensor = options.useSameTensor;
+        this.hasPositionId = model.hasPositionId;
         log(`WebNN EP config: ${model.name} · ${this.provider} · ${this.deviceType}`);
 
         const path = options.local ? model.local_path : model.remote_path;
@@ -215,7 +216,15 @@ export class LLM {
                 true,
                 false,
             );
-            this.positionIdsMlTensor = await createMlTensor(this.mlContext, "int64", [1, this.maxLength], true, false);
+            if (this.hasPositionId) {
+                this.positionIdsMlTensor = await createMlTensor(
+                    this.mlContext,
+                    "int64",
+                    [1, this.maxLength],
+                    true,
+                    false,
+                );
+            }
         } else if (this.provider == "webgpu") {
             // Pre-allocate kv cache gpu-buffer
             const numElements = this.kvDims.reduce((a, b) => a * b, 1);
@@ -327,9 +336,13 @@ export class LLM {
         const attnMaskLen =
             this.provider == "webnn" || this.useTwoSessions ? inputIdsLen : this.startLength + inputIdsLen;
         let attnMask = Array.from({ length: attnMaskLen }, () => BigInt(1));
-        let positionIds = Array.from({ length: inputIdsLen }, (_, i) =>
-            BigInt(this.provider == "webnn" || this.useTwoSessions ? i++ : this.startLength + i++),
-        );
+
+        let positionIds;
+        if (this.hasPositionId) {
+            positionIds = Array.from({ length: inputIdsLen }, (_, i) =>
+                BigInt(this.provider == "webnn" || this.useTwoSessions ? i++ : this.startLength + i++),
+            );
+        }
         // Both input_ids and position_ids have shapes of [batch_size, sequence_length].
         // The sequence_length is the length of inputIds, which is dynamic.
         // Since WebNN does not support dynamic shapes, fix the sequence_length to maxLength and
@@ -341,24 +354,32 @@ export class LLM {
         // which exceeds the 2GB tensor size limitation.
         if (this.provider == "webnn" || this.useTwoSessions) {
             inputIds = this.paddingInput(inputIds, this.maxLength);
-            positionIds = this.paddingInput(positionIds, this.maxLength);
+            if (this.hasPositionId) {
+                positionIds = this.paddingInput(positionIds, this.maxLength);
+            }
             attnMask = this.paddingInput(attnMask, this.maxLength);
         }
 
         if (this.provider == "webnn") {
             this.mlContext.writeTensor(this.inputIdsMlTensor.mlTensor, BigInt64Array.from(inputIds));
             this.mlContext.writeTensor(this.attentionMaskMlTensor.mlTensor, BigInt64Array.from(attnMask));
-            this.mlContext.writeTensor(this.positionIdsMlTensor.mlTensor, BigInt64Array.from(positionIds));
+            if (this.hasPositionId) {
+                this.mlContext.writeTensor(this.positionIdsMlTensor.mlTensor, BigInt64Array.from(positionIds));
+            }
             this.feed["input_ids"] = this.inputIdsMlTensor;
             this.feed["attention_mask"] = this.attentionMaskMlTensor;
-            this.feed["position_ids"] = this.positionIdsMlTensor;
+            if (this.hasPositionId) {
+                this.feed["position_ids"] = this.positionIdsMlTensor;
+            }
         } else {
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIds.length]);
             this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
-            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [
-                1,
-                positionIds.length,
-            ]);
+            if (this.hasPositionId) {
+                this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [
+                    1,
+                    positionIds.length,
+                ]);
+            }
         }
         this.stop = false;
 
@@ -443,7 +464,13 @@ export class LLM {
             }
 
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
-            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(this.startLength)]), [1, 1]);
+            if (this.hasPositionId) {
+                this.feed["position_ids"] = new ort.Tensor(
+                    "int64",
+                    BigInt64Array.from([BigInt(this.startLength)]),
+                    [1, 1],
+                );
+            }
             if (this.provider == "webnn") {
                 this.mlContext.writeTensor(this.feed["attention_mask"].mlTensor, BigInt64Array.from(attnMask));
             } else {

@@ -33,10 +33,11 @@ const MODELS = {
         kv_num_heads: 4,
         head_size: 64,
         vocab_size: 32000,
+        hasPositionId: true,
         system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
     },
     tinyllama_v2: {
-        name: "TinyLlama 1.1B Chat v1.0",
+        name: "TinyLlama 1.1B Chat v1.0 for WebGPU v2",
         desc: "Meta TinyLlama-1.1B-Chat-v1.0",
         id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         file_name: "model.onnx",
@@ -48,6 +49,7 @@ const MODELS = {
         kv_num_heads: 4,
         head_size: 64,
         vocab_size: 32000,
+        hasPositionId: false,
         system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
     },
     phi4mini: {
@@ -64,6 +66,7 @@ const MODELS = {
         kv_num_heads: 8,
         head_size: 128,
         vocab_size: 200064,
+        hasPositionId: true,
         system_content: "You are a helpful AI assistant.",
     },
     qwen2: {
@@ -79,6 +82,7 @@ const MODELS = {
         kv_num_heads: 2,
         head_size: 64,
         vocab_size: 151936,
+        hasPositionId: true,
         system_content: "You are a helpful assistant.",
     },
     deepseekr1: {
@@ -96,6 +100,7 @@ const MODELS = {
         kv_num_heads: 2,
         head_size: 128,
         vocab_size: 151936,
+        hasPositionId: true,
         system_content: "",
     },
 };
