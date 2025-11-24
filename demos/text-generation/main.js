@@ -318,8 +318,8 @@ function getConfig() {
         logError(errorMessage);
         throw new Error(errorMessage);
     }
-    if (config.max_length < 0 || config.max_length > config.model.context_length) {
-        errorMessage = `max_length should not execeed ${config.model.context_length}`;
+    if (config.max_length < 0 || config.max_length > config.model.max_length) {
+        errorMessage = `max_length should not execeed ${config.model.max_length}`;
         logError(errorMessage);
         throw new Error(errorMessage);
     }
