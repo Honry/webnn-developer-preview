@@ -40,6 +40,26 @@ const models = [
         path: "./demos/sd-turbo/models/safety_checker",
     },
     {
+        url: "microsoft/sdxl-turbo-webnn/resolve/main/text_encoder/model.onnx",
+        path: "./demos/sdxl-turbo/models/text_encoder",
+    },
+    {
+        url: "microsoft/sdxl-turbo-webnn/resolve/main/text_encoder_2/model.onnx",
+        path: "./demos/sdxl-turbo/models/text_encoder_2",
+    },
+    {
+        url: "microsoft/sdxl-turbo-webnn/resolve/main/unet/model.onnx",
+        path: "./demos/sdxl-turbo/models/unet",
+    },
+    {
+        url: "microsoft/sdxl-turbo-webnn/resolve/main/vae_decoder/model.onnx",
+        path: "./demos/sdxl-turbo/models/vae_decoder",
+    },
+    {
+        url: "microsoft/sd-turbo-webnn/resolve/main/safety_checker/safety_checker_int32_reduceSum.onnx",
+        path: "./demos/sdxl-turbo/models/safety_checker",
+    },
+    {
         url: "microsoft/stable-diffusion-v1.5-webnn/resolve/main/text-encoder.onnx",
         path: "./demos/stable-diffusion-1.5/models",
     },
