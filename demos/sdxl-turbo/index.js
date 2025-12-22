@@ -245,107 +245,111 @@ async function load_models(models) {
 
     for (const [name, model] of Object.entries(models)) {
         const modelNameInLog = model.name;
-        try {
-            let start = performance.now();
-            let modelUrl = `${config.model}/${model.url}`;
-            if (modelUrl.includes("huggingface.co")) {
-                await getHuggingFaceDomain().then(domain => {
-                    modelUrl = modelUrl.replace("huggingface.co", domain);
-                });
-            }
-            log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
-            const modelBuffer = await getModelOPFS(`sdxl-turbo_${name}`, modelUrl, true);
-            if (model.has_external_data) {
-                const externalDataPath = modelUrl + ".data";
-                const externalDataBytes = await getModelOPFS(`sdxl-turbo_${name}_external`, externalDataPath, false);
-                opt.externalData = [
-                    {
-                        data: externalDataBytes,
-                        path: "model.onnx.data",
-                    },
-                ];
-            }
-            let modelFetchTime = (performance.now() - start).toFixed(2);
-            if (name == "text_encoder") {
-                textEncoderFetch.innerHTML = modelFetchTime;
-            } else if (name == "text_encoder_2") {
-                textEncoder2Fetch.innerHTML = modelFetchTime;
-            } else if (name == "unet") {
-                unetFetch.innerHTML = modelFetchTime;
-            } else if (name == "vae_decoder") {
-                vaeFetch.innerHTML = modelFetchTime;
-            } else if (name == "safety_checker") {
-                scFetch.innerHTML = modelFetchTime;
-            }
-            log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
-            log(`[Session Create] Beginning ${modelNameInLog}`);
-
-            start = performance.now();
-            const sess_opt = { ...opt, ...model.opt };
-            console.log(sess_opt);
-            models[name].sess = await ort.InferenceSession.create(modelBuffer, sess_opt);
-            let createTime = (performance.now() - start).toFixed(2);
-
-            if (getSafetyChecker()) {
-                if (name == "text_encoder") {
-                    textEncoderCreate.innerHTML = createTime;
-                    textEncoderCompileProgress = 1;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                } else if (name == "text_encoder_2") {
-                    textEncoder2Create.innerHTML = createTime;
-                    textEncoder2CompileProgress = 1;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                } else if (name == "unet") {
-                    unetCreate.innerHTML = createTime;
-                    unetCompileProgress = 7;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                } else if (name == "vae_decoder") {
-                    vaeCreate.innerHTML = createTime;
-                    vaeDecoderCompileProgress = 1;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                } else if (name == "safety_checker") {
-                    scCreate.innerHTML = createTime;
-                    scCompileProgress = 2;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                }
-            } else {
-                if (name == "text_encoder") {
-                    textEncoderCreate.innerHTML = createTime;
-                    textEncoderCompileProgress = 1;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                } else if (name == "text_encoder_2") {
-                    textEncoder2Create.innerHTML = createTime;
-                    textEncoder2CompileProgress = 1;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                } else if (name == "unet") {
-                    unetCreate.innerHTML = createTime;
-                    unetCompileProgress = 9;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                } else if (name == "vae_decoder") {
-                    vaeCreate.innerHTML = createTime;
-                    vaeDecoderCompileProgress = 1;
-                    updateProgress();
-                    updateLoadWave(progress.toFixed(2));
-                }
-            }
-
-            if (getMode()) {
-                log(`[Session Create] Create ${modelNameInLog} completed · ${createTime}ms`);
-            } else {
-                log(`[Session Create] Create ${modelNameInLog} completed`);
-            }
-        } catch (e) {
-            logError(`[Load] ${modelNameInLog} failed, ${e}`);
-            return;
+        // try {
+        let start = performance.now();
+        let modelUrl = `${config.model}/${model.url}`;
+        if (modelUrl.includes("huggingface.co")) {
+            await getHuggingFaceDomain().then(domain => {
+                modelUrl = modelUrl.replace("huggingface.co", domain);
+            });
         }
+        log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
+        const modelBuffer = await getModelOPFS(`sdxl-turbo_${modelUrl.replace(/\//g, "_")}`, modelUrl, true);
+        if (model.has_external_data) {
+            const externalDataPath = modelUrl + ".data";
+            const externalDataBytes = await getModelOPFS(
+                `sdxl-turbo_${modelUrl.replace(/\//g, "_")}_external`,
+                externalDataPath,
+                true,
+            );
+            opt.externalData = [
+                {
+                    data: externalDataBytes,
+                    path: "model.onnx.data",
+                },
+            ];
+        }
+        let modelFetchTime = (performance.now() - start).toFixed(2);
+        if (name == "text_encoder") {
+            textEncoderFetch.innerHTML = modelFetchTime;
+        } else if (name == "text_encoder_2") {
+            textEncoder2Fetch.innerHTML = modelFetchTime;
+        } else if (name == "unet") {
+            unetFetch.innerHTML = modelFetchTime;
+        } else if (name == "vae_decoder") {
+            vaeFetch.innerHTML = modelFetchTime;
+        } else if (name == "safety_checker") {
+            scFetch.innerHTML = modelFetchTime;
+        }
+        log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
+        log(`[Session Create] Beginning ${modelNameInLog}`);
+
+        start = performance.now();
+        const sess_opt = { ...opt, ...model.opt };
+        console.log(sess_opt);
+        models[name].sess = await ort.InferenceSession.create(modelBuffer, sess_opt);
+        let createTime = (performance.now() - start).toFixed(2);
+
+        if (getSafetyChecker()) {
+            if (name == "text_encoder") {
+                textEncoderCreate.innerHTML = createTime;
+                textEncoderCompileProgress = 1;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            } else if (name == "text_encoder_2") {
+                textEncoder2Create.innerHTML = createTime;
+                textEncoder2CompileProgress = 1;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            } else if (name == "unet") {
+                unetCreate.innerHTML = createTime;
+                unetCompileProgress = 7;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            } else if (name == "vae_decoder") {
+                vaeCreate.innerHTML = createTime;
+                vaeDecoderCompileProgress = 1;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            } else if (name == "safety_checker") {
+                scCreate.innerHTML = createTime;
+                scCompileProgress = 2;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            }
+        } else {
+            if (name == "text_encoder") {
+                textEncoderCreate.innerHTML = createTime;
+                textEncoderCompileProgress = 1;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            } else if (name == "text_encoder_2") {
+                textEncoder2Create.innerHTML = createTime;
+                textEncoder2CompileProgress = 1;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            } else if (name == "unet") {
+                unetCreate.innerHTML = createTime;
+                unetCompileProgress = 9;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            } else if (name == "vae_decoder") {
+                vaeCreate.innerHTML = createTime;
+                vaeDecoderCompileProgress = 1;
+                updateProgress();
+                updateLoadWave(progress.toFixed(2));
+            }
+        }
+
+        if (getMode()) {
+            log(`[Session Create] Create ${modelNameInLog} completed · ${createTime}ms`);
+        } else {
+            log(`[Session Create] Create ${modelNameInLog} completed`);
+        }
+        // } catch (e) {
+        //     logError(`[Load] ${modelNameInLog} failed, ${e}`);
+        //     return;
+        // }
     }
 
     updateLoadWave(100.0);
@@ -372,7 +376,6 @@ const tokenizer2 = await AutoTokenizer.from_pretrained(path + "_2");
 
 const maxLength = 77;
 const batchSize = config.images;
-// SDXL Turbo uses 512x512 images for training and inference
 const imageSize = 512;
 const numChannelsLatent = 4;
 const models = {
@@ -400,10 +403,53 @@ const models = {
             },
         },
     },
+    concat: {
+        // A small model to concat the two text encoder outputs.
+        name: "Concat Model",
+        url: "concat/model.onnx",
+        has_external_data: false,
+        size: "1KB",
+        opt: {
+            freeDimensionOverrides: {
+                batch_size: batchSize,
+            },
+            graphOptimizationLevel: config.provider === "webgpu" ? "disabled" : "all",
+        },
+    },
+    scheduler: {
+        name: "Scheduler",
+        url: "scheduler/model.onnx",
+        has_external_data: false,
+        size: "1KB",
+        opt: {
+            freeDimensionOverrides: {
+                batch: batchSize,
+                channels: 4,
+                height: imageSize / 8,
+                width: imageSize / 8,
+            },
+        },
+    },
+    latents: {
+        name: "Latents Model",
+        url: "latents/model.onnx",
+        has_external_data: false,
+        size: "1KB",
+        opt: {
+            freeDimensionOverrides: {
+                batch: batchSize,
+                channels: 4,
+                height: imageSize / 8,
+                width: imageSize / 8,
+            },
+        },
+    },
     unet: {
         name: "UNet",
+        // url: "unet/q4f32f16/model.onnx",
         url: "unet/model.onnx",
-        has_external_data: true,
+        // url: "unet/q4fp32/model.onnx",
+        has_external_data: false,
         size: "1.83GB",
         opt: {
             freeDimensionOverrides: {
@@ -522,7 +568,7 @@ function resize_image(imageIndex, targetWidth, targetHeight) {
     const canvas = $(`#img_canvas_test`);
     canvas.width = targetWidth;
     canvas.height = targetHeight;
-    let ctx = canvas.getContext("2d");
+    let ctx = canvas.getContext("2d", { willReadFrequently: true });
     let canvasSource = $(`#img_canvas_${imageIndex}`);
     ctx.drawImage(canvasSource, 0, 0, canvasSource.width, canvasSource.height, 0, 0, targetWidth, targetHeight);
     let imageData = ctx.getImageData(0, 0, targetWidth, targetHeight);
@@ -530,31 +576,14 @@ function resize_image(imageIndex, targetWidth, targetHeight) {
     return imageData;
 }
 
-function normalizeImageData(imageData) {
+function get_safety_checker_feed(imageData) {
+    const { data, width, height } = imageData;
+    const numPixels = width * height;
     const mean = [0.48145466, 0.4578275, 0.40821073];
     const std = [0.26862954, 0.26130258, 0.27577711];
-    const { data, width, height } = imageData;
-    const numPixels = width * height;
 
-    let array = new Float32Array(numPixels * 4).fill(0);
-
-    for (let i = 0; i < numPixels; i++) {
-        const offset = i * 4;
-        for (let c = 0; c < 3; c++) {
-            const normalizedValue = (data[offset + c] / 255 - mean[c]) / std[c];
-            array[offset + c] = normalizedValue * 255;
-        }
-    }
-
-    return { data: array, width: width, height: height };
-}
-
-function get_tensor_from_image(imageData, format) {
-    const { data, width, height } = imageData;
-    const numPixels = width * height;
-    const channels = 3;
-    const rearrangedData = new Float32Array(numPixels * channels);
-    let destOffset = 0;
+    const clipData = new Float32Array(numPixels * 3);
+    const imagesData = new Float32Array(numPixels * 3);
 
     for (let i = 0; i < numPixels; i++) {
         const srcOffset = i * 4;
@@ -562,38 +591,33 @@ function get_tensor_from_image(imageData, format) {
         const g = data[srcOffset + 1] / 255;
         const b = data[srcOffset + 2] / 255;
 
-        if (format === "NCHW") {
-            rearrangedData[destOffset] = r;
-            rearrangedData[destOffset + numPixels] = g;
-            rearrangedData[destOffset + 2 * numPixels] = b;
-            destOffset++;
-        } else if (format === "NHWC") {
-            rearrangedData[destOffset] = r;
-            rearrangedData[destOffset + 1] = g;
-            rearrangedData[destOffset + 2] = b;
-            destOffset += channels;
-        } else {
-            throw new Error("Invalid format specified.");
-        }
+        // clip_input: NCHW, Normalized
+        clipData[i] = (r - mean[0]) / std[0];
+        clipData[i + numPixels] = (g - mean[1]) / std[1];
+        clipData[i + 2 * numPixels] = (b - mean[2]) / std[2];
+
+        // images: NHWC, 0-1
+        const destOffset = i * 3;
+        imagesData[destOffset] = r;
+        imagesData[destOffset + 1] = g;
+        imagesData[destOffset + 2] = b;
     }
 
-    const tensorShape = format === "NCHW" ? [1, channels, height, width] : [1, height, width, channels];
-    let tensor = new ort.Tensor("float16", convertToFloat16OrUint16Array(rearrangedData), tensorShape);
-
-    return tensor;
+    return {
+        clip_input: new ort.Tensor("float16", convertToFloat16OrUint16Array(clipData), [1, 3, height, width]),
+        images: new ort.Tensor("float16", convertToFloat16OrUint16Array(imagesData), [1, height, width, 3]),
+    };
 }
 
 /**
- * draw images from tensor
- * @param {ort.Tensor} t
+ * draw images from pixel data
+ * @param {Float32Array} pix
  * @param {number} imageIndex
+ * @param {number} height
+ * @param {number} width
  */
-function draw_image(t, imageIndex) {
-    const pix = t.data;
-    const height = t.dims[2];
-    const width = t.dims[3];
+function draw_image(pix, imageIndex, height, width) {
     const channelSize = height * width;
-
     const rgbaData = new Uint8ClampedArray(channelSize * 4);
 
     for (let j = 0; j < channelSize; j++) {
@@ -679,12 +703,6 @@ async function generate_image() {
             truncation: true,
             return_tensor: false,
         });
-        const { input_ids: inputIds2 } = await tokenizer2(prompt.value, {
-            padding: "max_length",
-            maxLength: maxLength,
-            truncation: true,
-            return_tensor: false,
-        });
 
         // Run Text Encoder 1 (Batch 1) - Optimization: Run once, then repeat
         const inputIdsData = new Int32Array(inputIds);
@@ -703,6 +721,12 @@ async function generate_image() {
 
         // Run Text Encoder 2 (Batch 1)
         start = performance.now();
+        const { input_ids: inputIds2 } = await tokenizer2(prompt.value, {
+            padding: "max_length",
+            maxLength: maxLength,
+            truncation: true,
+            return_tensor: false,
+        });
         const inputIds2Data = new BigInt64Array(inputIds2.map(x => BigInt(x)));
         const textEncoder2Outputs = await models.text_encoder_2.sess.run({
             input_ids: new ort.Tensor("int64", inputIds2Data, [1, maxLength]),
@@ -721,7 +745,8 @@ async function generate_image() {
         start = performance.now();
 
         // Construct promptEmbeds (Batch N) by repeating the single batch output
-        // This ensures valid embeddings for ALL images in the batch
+        // This ensures valid embeddings for ALL images in the batch.
+
         const promptEmbedsData = new Float32Array(batchSize * maxLength * 2048);
         const te1Output = textEncoderOutputs["hidden_states.11"].data; // [77, 768]
         const te2Output = textEncoder2Outputs["hidden_states.31"].data; // [77, 1280]
@@ -745,17 +770,31 @@ async function generate_image() {
         }
         const pooledPromptEmbeds = new ort.Tensor("float32", pooledData, [batchSize, 1280]);
 
+        // const concatOutputs = await models.concat.sess.run({
+        //     hidden_states_1: textEncoderOutputs["hidden_states.11"],
+        //     hidden_states_2: textEncoder2Outputs["hidden_states.31"],
+        //     text_embeds: textEncoder2Outputs.text_embeds,
+        //     // Create a dummy tensor with shape [batchSize] to allow shape inference
+        //     sample: new ort.Tensor("int32", new Int32Array(batchSize), [batchSize]),
+        // });
+
+        // Initialize latents (Batch N) for random noise
         const latentShape = [batchSize, numChannelsLatent, imageSize / 8, imageSize / 8];
+        // const size = batchSize * numChannelsLatent * (imageSize / 8) * (imageSize / 8);
+        // const dummyInput = new ort.Tensor("float32", new Float32Array(size), latentShape);
+
+        // const latentsOutputs = await models.latents.sess.run({
+        //     sample: dummyInput,
+        // });
         const latents = new ort.Tensor(randn_latents(latentShape, sigma), latentShape);
         const latentModelInput = scale_model_inputs(latents);
 
         // Run UNet
-
         const feed = {
-            sample: new ort.Tensor("float32", latentModelInput.data, latentModelInput.dims),
-            timestep: new ort.Tensor("float32", new Float32Array(1).fill(999), [1]),
-            encoder_hidden_states: promptEmbeds,
-            text_embeds: pooledPromptEmbeds,
+            sample: latentModelInput, // latentsOutputs.latentModelInput,
+            timestep: new ort.Tensor("float32", new Float32Array([999]), [1]),
+            encoder_hidden_states: promptEmbeds, // concatOutputs.prompt_embeds,
+            text_embeds: pooledPromptEmbeds, // concatOutputs.pooled_prompt_embeds,
             time_ids: new ort.Tensor("float32", get_add_time_ids(imageSize, imageSize, batchSize), [batchSize, 6]),
         };
 
@@ -772,12 +811,18 @@ async function generate_image() {
 
         // Inference parepare for VAE Decoder
         start = performance.now();
+
         // scheduler
+        // const schedulerOutputs = await models.scheduler.sess.run({
+        //     out_sample: unetOutputs.out_sample,
+        //     sample: latents, // latentsOutputs.latents,
+        // });
+
         const newLatents = step(unetOutputs.out_sample, latents);
 
-        // VAE Decoder
+        // Run VAE Decoder
         const { sample } = await models.vae_decoder.sess.run({
-            latent_sample: newLatents,
+            latent_sample: newLatents, // schedulerOutputs.prevSample,
         });
 
         let vaeRunTime = (performance.now() - start).toFixed(2);
@@ -795,8 +840,7 @@ async function generate_image() {
             const size = 3 * imageSize * imageSize;
             const offset = i * size;
             const subPix = pix.subarray(offset, offset + size);
-            const subTensor = new ort.Tensor("float32", subPix, [1, 3, imageSize, imageSize]);
-            draw_image(subTensor, i);
+            draw_image(subPix, i, imageSize, imageSize);
         }
 
         const imageDrawTime = (performance.now() - start).toFixed(2);
@@ -809,11 +853,7 @@ async function generate_image() {
             if (getSafetyChecker()) {
                 // safety_checker
                 const resizedImageData = resize_image(i, 224, 224);
-                const normalizedImageData = normalizeImageData(resizedImageData);
-                const safetyCheckerFeed = {
-                    clip_input: get_tensor_from_image(normalizedImageData, "NCHW"),
-                    images: get_tensor_from_image(resizedImageData, "NHWC"),
-                };
+                const safetyCheckerFeed = get_safety_checker_feed(resizedImageData);
                 start = performance.now();
                 const { has_nsfw_concepts } = await models.safety_checker.sess.run(safetyCheckerFeed);
 
@@ -1148,14 +1188,20 @@ const ui = async () => {
         document.body.setAttribute("class", "npu");
     }
 
-    prompt.value = "A cinematic shot of a baby racoon wearing an intricate italian priest robe.";
+    // prompt.value = "A cinematic shot of a baby racoon wearing an intricate italian priest robe.";
+    // prompt.value =
+    // "a cat under the snow with blue eyes, covered by snow, cinematic style, medium shot, professional photo, high detail, 8k";
+    prompt.value = `A scene mountain landscape at sunrise, soft golden light, clear sky, very detailed, photo-realistic style.
+\ Add a crystal clear lake reflecting the mountain.
+\ Add a wooden cabin near the shore.
+\ Surround the cabin with tall palm and coconut trees.`;
     // Event listener for Ctrl + Enter or CMD + Enter
-    prompt.addEventListener("keydown", function (e) {
+    prompt.addEventListener("keydown", e => {
         if (e.ctrlKey && e.key === "Enter") {
             generate_image();
         }
     });
-    generate.addEventListener("click", function () {
+    generate.addEventListener("click", () => {
         generate_image();
     });
 
