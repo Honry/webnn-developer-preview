@@ -1191,10 +1191,11 @@ const ui = async () => {
     // prompt.value = "A cinematic shot of a baby racoon wearing an intricate italian priest robe.";
     // prompt.value =
     // "a cat under the snow with blue eyes, covered by snow, cinematic style, medium shot, professional photo, high detail, 8k";
-    prompt.value = `A scene mountain landscape at sunrise, soft golden light, clear sky, very detailed, photo-realistic style.
-\ Add a crystal clear lake reflecting the mountain.
-\ Add a wooden cabin near the shore.
-\ Surround the cabin with tall palm and coconut trees.`;
+    prompt.value =
+        "A scene mountain landscape at sunrise, soft golden light, clear sky, very detailed, photo-realistic style." +
+        " Add a crystal clear lake reflecting the mountain." +
+        " Add a wooden cabin near the shore." +
+        " Surround the cabin with tall palm and coconut trees.";
     // Event listener for Ctrl + Enter or CMD + Enter
     prompt.addEventListener("keydown", e => {
         if (e.ctrlKey && e.key === "Enter") {
