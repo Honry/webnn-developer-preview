@@ -254,13 +254,13 @@ async function load_models(models) {
             });
         }
         log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
-        const modelBuffer = await getModelOPFS(`sdxl-turbo_${modelUrl.replace(/\//g, "_")}`, modelUrl, true);
+        const modelBuffer = await getModelOPFS(`sdxl-turbo_${modelUrl.replace(/\//g, "_")}`, modelUrl, false);
         if (model.has_external_data) {
             const externalDataPath = modelUrl + ".data";
             const externalDataBytes = await getModelOPFS(
                 `sdxl-turbo_${modelUrl.replace(/\//g, "_")}_external`,
                 externalDataPath,
-                true,
+                false,
             );
             opt.externalData = [
                 {
@@ -647,270 +647,231 @@ async function generate_image() {
     const imgDivs = [img_div_0, img_div_1, img_div_2, img_div_3];
     imgDivs.forEach(div => div.setAttribute("class", "frame"));
 
-    try {
-        textEncoderRun1.innerHTML = "";
-        textEncoderRun2.innerHTML = "";
-        textEncoderRun3.innerHTML = "";
-        textEncoderRun4.innerHTML = "";
-        textEncoder2Run1.innerHTML = "";
-        textEncoder2Run2.innerHTML = "";
-        textEncoder2Run3.innerHTML = "";
-        textEncoder2Run4.innerHTML = "";
-        unetRun1.innerHTML = "";
-        unetRun2.innerHTML = "";
-        unetRun3.innerHTML = "";
-        unetRun4.innerHTML = "";
-        vaeRun1.innerHTML = "";
-        vaeRun2.innerHTML = "";
-        vaeRun3.innerHTML = "";
-        vaeRun4.innerHTML = "";
-        runTotal1.innerHTML = "";
-        runTotal2.innerHTML = "";
-        runTotal3.innerHTML = "";
-        runTotal4.innerHTML = "";
-        scRun1.innerHTML = "";
-        scRun2.innerHTML = "";
-        scRun3.innerHTML = "";
-        scRun4.innerHTML = "";
+    // try {
+    textEncoderRun.innerHTML = "";
+    textEncoder2Run.innerHTML = "";
+    unetRun.innerHTML = "";
+    vaeRun.innerHTML = "";
+    runTotal.innerHTML = "";
+    scRun.innerHTML = "";
 
-        if (getMode()) {
-            for (let i = 1; i <= batchSize; i++) {
-                $(`#data${i}`).innerHTML = "... ms";
-                $(`#data${i}`).setAttribute("class", "show");
-            }
-        } else {
-            for (let i = 1; i <= batchSize; i++) {
-                $(`#data${i}`).innerHTML = "...";
-                $(`#data${i}`).setAttribute("class", "show");
-            }
+    $("#total_data").innerHTML = "...";
+    $("#total_data").setAttribute("class", "show");
+
+    log(`[Session Run] Beginning`);
+
+    await loading;
+    for (let i = 0; i < batchSize; i++) {
+        $(`#img_div_${i}`).setAttribute("class", "frame inferncing");
+    }
+
+    // Inference prepare for Text Encoders
+    let start = performance.now();
+    const startTotal = start;
+
+    const prompt = $("#user-input");
+    const { input_ids: inputIds } = await tokenizer(prompt.value, {
+        padding: "max_length",
+        maxLength: maxLength,
+        truncation: true,
+        return_tensor: false,
+    });
+
+    // Run Text Encoder 1 (Batch 1) - Optimization: Run once, then repeat
+    const inputIdsData = new Int32Array(inputIds);
+    const textEncoderOutputs = await models.text_encoder.sess.run({
+        input_ids: new ort.Tensor("int32", inputIdsData, [1, maxLength]),
+    });
+
+    const sessionRunTimeTextEncode = (performance.now() - start).toFixed(2);
+    textEncoderRun.innerHTML = sessionRunTimeTextEncode;
+
+    if (getMode()) {
+        log(`[Session Run] Text Encoder execution time: ${sessionRunTimeTextEncode}ms`);
+    } else {
+        log(`[Session Run] Text Encoder completed`);
+    }
+
+    // Run Text Encoder 2 (Batch 1)
+    start = performance.now();
+    const { input_ids: inputIds2 } = await tokenizer2(prompt.value, {
+        padding: "max_length",
+        maxLength: maxLength,
+        truncation: true,
+        return_tensor: false,
+    });
+    const inputIds2Data = new BigInt64Array(inputIds2.map(x => BigInt(x)));
+    const textEncoder2Outputs = await models.text_encoder_2.sess.run({
+        input_ids: new ort.Tensor("int64", inputIds2Data, [1, maxLength]),
+    });
+
+    const sessionRunTimeTextEncode2 = (performance.now() - start).toFixed(2);
+    textEncoder2Run.innerHTML = sessionRunTimeTextEncode2;
+
+    if (getMode()) {
+        log(`[Session Run] Text Encoder 2 execution time: ${sessionRunTimeTextEncode2}ms`);
+    } else {
+        log(`[Session Run] Text Encoder 2 completed`);
+    }
+
+    // Inference prepare for UNet
+    start = performance.now();
+
+    // Construct promptEmbeds (Batch N) by repeating the single batch output
+    // This ensures valid embeddings for ALL images in the batch.
+
+    const promptEmbedsData = new Float32Array(batchSize * maxLength * 2048);
+    const te1Output = textEncoderOutputs["hidden_states.11"].data; // [77, 768]
+    const te2Output = textEncoder2Outputs["hidden_states.31"].data; // [77, 1280]
+
+    for (let i = 0; i < batchSize; i++) {
+        for (let j = 0; j < maxLength; j++) {
+            const destOffset = (i * maxLength + j) * 2048;
+            // Copy 768 from Text Encoder 1
+            promptEmbedsData.set(te1Output.subarray(j * 768, (j + 1) * 768), destOffset);
+            // Copy 1280 from Text Encoder 2
+            promptEmbedsData.set(te2Output.subarray(j * 1280, (j + 1) * 1280), destOffset + 768);
         }
+    }
+    const promptEmbeds = new ort.Tensor("float32", promptEmbedsData, [batchSize, maxLength, 2048]);
 
-        log(`[Session Run] Beginning`);
+    // Construct pooledPromptEmbeds (Batch N) by repeating
+    const pooledOutput = textEncoder2Outputs.text_embeds.data; // [1280]
+    const pooledData = new Float32Array(batchSize * 1280);
+    for (let i = 0; i < batchSize; i++) {
+        pooledData.set(pooledOutput, i * 1280);
+    }
+    const pooledPromptEmbeds = new ort.Tensor("float32", pooledData, [batchSize, 1280]);
 
-        await loading;
-        for (let i = 0; i < batchSize; i++) {
-            $(`#img_div_${i}`).setAttribute("class", "frame inferncing");
-        }
+    // const concatOutputs = await models.concat.sess.run({
+    //     hidden_states_1: textEncoderOutputs["hidden_states.11"],
+    //     hidden_states_2: textEncoder2Outputs["hidden_states.31"],
+    //     text_embeds: textEncoder2Outputs.text_embeds,
+    //     // Create a dummy tensor with shape [batchSize] to allow shape inference
+    //     sample: new ort.Tensor("int32", new Int32Array(batchSize), [batchSize]),
+    // });
 
-        // Inference prepare for Text Encoders
-        let start = performance.now();
-        const startTotal = start;
+    // Initialize latents (Batch N) for random noise
+    const latentShape = [batchSize, numChannelsLatent, imageSize / 8, imageSize / 8];
+    // const size = batchSize * numChannelsLatent * (imageSize / 8) * (imageSize / 8);
+    // const dummyInput = new ort.Tensor("float32", new Float32Array(size), latentShape);
 
-        const prompt = $("#user-input");
-        const { input_ids: inputIds } = await tokenizer(prompt.value, {
-            padding: "max_length",
-            maxLength: maxLength,
-            truncation: true,
-            return_tensor: false,
-        });
+    // const latentsOutputs = await models.latents.sess.run({
+    //     sample: dummyInput,
+    // });
+    const latents = new ort.Tensor(randn_latents(latentShape, sigma), latentShape);
+    const latentModelInput = scale_model_inputs(latents);
 
-        // Run Text Encoder 1 (Batch 1) - Optimization: Run once, then repeat
-        const inputIdsData = new Int32Array(inputIds);
-        const textEncoderOutputs = await models.text_encoder.sess.run({
-            input_ids: new ort.Tensor("int32", inputIdsData, [1, maxLength]),
-        });
+    // Run UNet
+    const feed = {
+        sample: latentModelInput, // latentsOutputs.latentModelInput,
+        timestep: new ort.Tensor("float32", new Float32Array([999]), [1]),
+        encoder_hidden_states: promptEmbeds, // concatOutputs.prompt_embeds,
+        text_embeds: pooledPromptEmbeds, // concatOutputs.pooled_prompt_embeds,
+        time_ids: new ort.Tensor("float32", get_add_time_ids(imageSize, imageSize, batchSize), [batchSize, 6]),
+    };
 
-        const sessionRunTimeTextEncode = (performance.now() - start).toFixed(2);
-        textEncoderRun1.innerHTML = sessionRunTimeTextEncode;
+    const unetOutputs = await models.unet.sess.run(feed);
 
-        if (getMode()) {
-            log(`[Session Run] Text Encoder execution time: ${sessionRunTimeTextEncode}ms`);
-        } else {
-            log(`[Session Run] Text Encoder completed`);
-        }
+    const unetRunTime = (performance.now() - start).toFixed(2);
+    $(`#unetRun`).innerHTML = unetRunTime;
 
-        // Run Text Encoder 2 (Batch 1)
-        start = performance.now();
-        const { input_ids: inputIds2 } = await tokenizer2(prompt.value, {
-            padding: "max_length",
-            maxLength: maxLength,
-            truncation: true,
-            return_tensor: false,
-        });
-        const inputIds2Data = new BigInt64Array(inputIds2.map(x => BigInt(x)));
-        const textEncoder2Outputs = await models.text_encoder_2.sess.run({
-            input_ids: new ort.Tensor("int64", inputIds2Data, [1, maxLength]),
-        });
+    if (getMode()) {
+        log(`[Session Run] UNet execution time: ${unetRunTime}ms`);
+    } else {
+        log(`[Session Run] UNet completed`);
+    }
 
-        const sessionRunTimeTextEncode2 = (performance.now() - start).toFixed(2);
-        textEncoder2Run1.innerHTML = sessionRunTimeTextEncode2;
+    // Inference parepare for VAE Decoder
+    start = performance.now();
 
-        if (getMode()) {
-            log(`[Session Run] Text Encoder 2 execution time: ${sessionRunTimeTextEncode2}ms`);
-        } else {
-            log(`[Session Run] Text Encoder 2 completed`);
-        }
+    // scheduler
+    // const schedulerOutputs = await models.scheduler.sess.run({
+    //     out_sample: unetOutputs.out_sample,
+    //     sample: latents, // latentsOutputs.latents,
+    // });
 
-        // Inference prepare for UNet
-        start = performance.now();
+    const newLatents = step(unetOutputs.out_sample, latents);
 
-        // Construct promptEmbeds (Batch N) by repeating the single batch output
-        // This ensures valid embeddings for ALL images in the batch.
+    // Run VAE Decoder
+    const { sample } = await models.vae_decoder.sess.run({
+        latent_sample: newLatents, // schedulerOutputs.prevSample,
+    });
 
-        const promptEmbedsData = new Float32Array(batchSize * maxLength * 2048);
-        const te1Output = textEncoderOutputs["hidden_states.11"].data; // [77, 768]
-        const te2Output = textEncoder2Outputs["hidden_states.31"].data; // [77, 1280]
+    let vaeRunTime = (performance.now() - start).toFixed(2);
+    $(`#vaeRun`).innerHTML = vaeRunTime;
 
-        for (let i = 0; i < batchSize; i++) {
-            for (let j = 0; j < maxLength; j++) {
-                const destOffset = (i * maxLength + j) * 2048;
-                // Copy 768 from Text Encoder 1
-                promptEmbedsData.set(te1Output.subarray(j * 768, (j + 1) * 768), destOffset);
-                // Copy 1280 from Text Encoder 2
-                promptEmbedsData.set(te2Output.subarray(j * 1280, (j + 1) * 1280), destOffset + 768);
-            }
-        }
-        const promptEmbeds = new ort.Tensor("float32", promptEmbedsData, [batchSize, maxLength, 2048]);
+    if (getMode()) {
+        log(`[Session Run] VAE Decoder execution time: ${vaeRunTime}ms`);
+    } else {
+        log(`[Session Run] VAE Decoder completed`);
+    }
 
-        // Construct pooledPromptEmbeds (Batch N) by repeating
-        const pooledOutput = textEncoder2Outputs.text_embeds.data; // [1280]
-        const pooledData = new Float32Array(batchSize * 1280);
-        for (let i = 0; i < batchSize; i++) {
-            pooledData.set(pooledOutput, i * 1280);
-        }
-        const pooledPromptEmbeds = new ort.Tensor("float32", pooledData, [batchSize, 1280]);
+    start = performance.now();
+    const pix = sample.data;
+    for (let i = 0; i < batchSize; i++) {
+        const size = 3 * imageSize * imageSize;
+        const offset = i * size;
+        const subPix = pix.subarray(offset, offset + size);
+        draw_image(subPix, i, imageSize, imageSize);
+    }
 
-        // const concatOutputs = await models.concat.sess.run({
-        //     hidden_states_1: textEncoderOutputs["hidden_states.11"],
-        //     hidden_states_2: textEncoder2Outputs["hidden_states.31"],
-        //     text_embeds: textEncoder2Outputs.text_embeds,
-        //     // Create a dummy tensor with shape [batchSize] to allow shape inference
-        //     sample: new ort.Tensor("int32", new Int32Array(batchSize), [batchSize]),
-        // });
+    const imageDrawTime = (performance.now() - start).toFixed(2);
+    log(`[Images Drawing] drawing ${batchSize} images time: ${imageDrawTime}ms`);
 
-        // Initialize latents (Batch N) for random noise
-        const latentShape = [batchSize, numChannelsLatent, imageSize / 8, imageSize / 8];
-        // const size = batchSize * numChannelsLatent * (imageSize / 8) * (imageSize / 8);
-        // const dummyInput = new ort.Tensor("float32", new Float32Array(size), latentShape);
-
-        // const latentsOutputs = await models.latents.sess.run({
-        //     sample: dummyInput,
-        // });
-        const latents = new ort.Tensor(randn_latents(latentShape, sigma), latentShape);
-        const latentModelInput = scale_model_inputs(latents);
-
-        // Run UNet
-        const feed = {
-            sample: latentModelInput, // latentsOutputs.latentModelInput,
-            timestep: new ort.Tensor("float32", new Float32Array([999]), [1]),
-            encoder_hidden_states: promptEmbeds, // concatOutputs.prompt_embeds,
-            text_embeds: pooledPromptEmbeds, // concatOutputs.pooled_prompt_embeds,
-            time_ids: new ort.Tensor("float32", get_add_time_ids(imageSize, imageSize, batchSize), [batchSize, 6]),
-        };
-
-        const unetOutputs = await models.unet.sess.run(feed);
-
-        const unetRunTime = (performance.now() - start).toFixed(2);
-        $(`#unetRun1`).innerHTML = unetRunTime;
-
-        if (getMode()) {
-            log(`[Session Run] UNet execution time: ${unetRunTime}ms`);
-        } else {
-            log(`[Session Run] UNet completed`);
-        }
-
-        // Inference parepare for VAE Decoder
-        start = performance.now();
-
-        // scheduler
-        // const schedulerOutputs = await models.scheduler.sess.run({
-        //     out_sample: unetOutputs.out_sample,
-        //     sample: latents, // latentsOutputs.latents,
-        // });
-
-        const newLatents = step(unetOutputs.out_sample, latents);
-
-        // Run VAE Decoder
-        const { sample } = await models.vae_decoder.sess.run({
-            latent_sample: newLatents, // schedulerOutputs.prevSample,
-        });
-
-        let vaeRunTime = (performance.now() - start).toFixed(2);
-        $(`#vaeRun1`).innerHTML = vaeRunTime;
-
-        if (getMode()) {
-            log(`[Session Run] VAE Decoder execution time: ${vaeRunTime}ms`);
-        } else {
-            log(`[Session Run] VAE Decoder completed`);
-        }
-
-        start = performance.now();
-        const pix = sample.data;
-        for (let i = 0; i < batchSize; i++) {
-            const size = 3 * imageSize * imageSize;
-            const offset = i * size;
-            const subPix = pix.subarray(offset, offset + size);
-            draw_image(subPix, i, imageSize, imageSize);
-        }
-
-        const imageDrawTime = (performance.now() - start).toFixed(2);
-        log(`[Images Drawing] drawing 4 images time: ${imageDrawTime}ms`);
-
-        const totalRunTime = (performance.now() - startTotal).toFixed(2);
+    const totalRunTime = (performance.now() - startTotal).toFixed(2);
+    if (getMode()) {
         log(`[Total] Total images generation time: ${totalRunTime}ms`);
+    }
+    $("#runTotal").innerHTML = totalRunTime;
 
-        for (let i = 0; i < batchSize; i++) {
-            if (getSafetyChecker()) {
-                // safety_checker
-                const resizedImageData = resize_image(i, 224, 224);
-                const safetyCheckerFeed = get_safety_checker_feed(resizedImageData);
-                start = performance.now();
-                const { has_nsfw_concepts } = await models.safety_checker.sess.run(safetyCheckerFeed);
+    let totalScRunTime = 0;
+    for (let i = 0; i < batchSize; i++) {
+        if (getSafetyChecker()) {
+            // safety_checker
+            const resizedImageData = resize_image(i, 224, 224);
+            const safetyCheckerFeed = get_safety_checker_feed(resizedImageData);
+            start = performance.now();
+            const { has_nsfw_concepts } = await models.safety_checker.sess.run(safetyCheckerFeed);
 
-                let scRunTime = (performance.now() - start).toFixed(2);
-                $(`#scRun${i + 1}`).innerHTML = scRunTime;
+            let scRunTime = performance.now() - start;
+            totalScRunTime += scRunTime;
+            if (getMode()) {
+                log(`[Session Run][Image ${i + 1}] Safety Checker execution time: ${scRunTime.toFixed(2)}ms`);
+            } else {
+                log(`[Session Run][Image ${i + 1}] Safety Checker completed`);
+            }
 
-                if (getMode()) {
-                    log(`[Session Run][Image ${i + 1}] Safety Checker execution time: ${scRunTime}ms`);
-                } else {
-                    log(`[Session Run][Image ${i + 1}] Safety Checker completed`);
-                }
-
-                $(`#img_div_${i}`).setAttribute("class", "frame done");
-
-                let nsfw = false;
-                has_nsfw_concepts.data[0] ? (nsfw = true) : (nsfw = false);
-                log(`[Session Run][Image ${i + 1}] Safety Checker - not safe for work (NSFW) concepts: ${nsfw}`);
-                if (has_nsfw_concepts.data[0]) {
-                    $(`#img_div_${i}`).setAttribute("class", "frame done nsfw");
-                    if (getMode()) {
-                        $(`#data${i + 1}`).innerHTML = totalRunTime + "ms · NSFW";
-                    } else {
-                        $(`#data${i + 1}`).innerHTML = `${i + 1} · NSFW`;
-                    }
-                    $(`#data${i + 1}`).setAttribute("class", "nsfw show");
-                    $(`#data${i + 1}`).setAttribute("title", "Not safe for work (NSFW) content");
-                } else {
-                    $(`#img_div_${i}`).setAttribute("class", "frame done");
-                }
+            let nsfw = false;
+            has_nsfw_concepts.data[0] ? (nsfw = true) : (nsfw = false);
+            log(`[Session Run][Image ${i + 1}] Safety Checker - not safe for work (NSFW) concepts: ${nsfw}`);
+            if (has_nsfw_concepts.data[0]) {
+                $(`#img_div_${i}`).setAttribute("class", "frame done nsfw");
+                $(`#img_div_${i}`).setAttribute("title", "Not safe for work (NSFW) content");
             } else {
                 $(`#img_div_${i}`).setAttribute("class", "frame done");
             }
+            if (i == batchSize - 1) {
+                $("#scRun").innerHTML = totalScRunTime.toFixed(2);
+                if (getMode()) {
+                    log(`[Session Run] Safety Checker total execution time: ${totalScRunTime.toFixed(2)}ms`);
+                }
+            }
+        } else {
+            $(`#img_div_${i}`).setAttribute("class", "frame done");
         }
-
-        generate.disabled = false;
-
-        // for (let j = 0; j < batchSize; j++) {
-        //     let totalRunTime = (performance.now() + Number(sessionRunTimeTextEncode) - startTotal).toFixed(2);
-        //     if (getMode()) {
-        //         log(`[Total] Image ${j + 1} execution time: ${totalRunTime}ms`);
-        //     }
-        //     $(`#runTotal${j + 1}`).innerHTML = totalRunTime;
-        //     $(`#data${j + 1}`).setAttribute("class", "show");
-
-        //     if (getMode()) {
-        //         $(`#data${j + 1}`).innerHTML = totalRunTime + "ms";
-        //     } else {
-        //         $(`#data${j + 1}`).innerHTML = `${j + 1}`;
-        //     }
-        // }
-        // // this is a gpu-buffer we own, so we need to dispose it
-        // last_hidden_state.dispose();
-        log("[Info] Images generation completed");
-    } catch (e) {
-        logError("[Error] " + e);
-        return;
     }
+
+    $("#total_data").innerHTML = `${totalRunTime} ms`;
+
+    generate.disabled = false;
+    // // this is a gpu-buffer we own, so we need to dispose it
+    // last_hidden_state.dispose();
+    log("[Info] Images generation completed");
+    // } catch (e) {
+    //     logError("[Error] " + e);
+    //     return;
+    // }
 }
 
 let webnnStatus;
@@ -981,36 +942,18 @@ let textEncoderFetch = null;
 let textEncoderCreate = null;
 let textEncoder2Fetch = null;
 let textEncoder2Create = null;
-let textEncoderRun1 = null;
-let textEncoderRun2 = null;
-let textEncoderRun3 = null;
-let textEncoderRun4 = null;
-let textEncoder2Run1 = null;
-let textEncoder2Run2 = null;
-let textEncoder2Run3 = null;
-let textEncoder2Run4 = null;
+let textEncoderRun = null;
+let textEncoder2Run = null;
 let unetFetch = null;
 let unetCreate = null;
-let unetRun1 = null;
-let unetRun2 = null;
-let unetRun3 = null;
-let unetRun4 = null;
-let vaeRun1 = null;
-let vaeRun2 = null;
-let vaeRun3 = null;
-let vaeRun4 = null;
+let unetRun = null;
+let vaeRun = null;
 let scFetch = null;
 let scCreate = null;
-let scRun1 = null;
-let scRun2 = null;
-let scRun3 = null;
-let scRun4 = null;
+let scRun = null;
 let vaeFetch = null;
 let vaeCreate = null;
-let runTotal1 = null;
-let runTotal2 = null;
-let runTotal3 = null;
-let runTotal4 = null;
+let runTotal = null;
 let generate = null;
 let load = null;
 let buttons = null;
@@ -1050,7 +993,6 @@ const ui = async () => {
     const prompt = $("#user-input");
     const title = $("#title");
     const dev = $("#dev");
-    const dataElement = $("#data");
     const scTr = $("#scTr");
     load = $("#load");
     generate = $("#generate");
@@ -1066,7 +1008,6 @@ const ui = async () => {
 
     if (!getMode()) {
         dev.setAttribute("class", "mt-1");
-        dataElement.setAttribute("class", "hide");
     }
 
     await setupORT("sdxl-turbo", "dev");
@@ -1082,36 +1023,18 @@ const ui = async () => {
         "#textEncoderCreate",
         "#textEncoder2Fetch",
         "#textEncoder2Create",
-        "#textEncoderRun1",
-        "#textEncoderRun2",
-        "#textEncoderRun3",
-        "#textEncoderRun4",
-        "#textEncoder2Run1",
-        "#textEncoder2Run2",
-        "#textEncoder2Run3",
-        "#textEncoder2Run4",
-        "#unetRun1",
-        "#unetRun2",
-        "#unetRun3",
-        "#unetRun4",
-        "#runTotal1",
-        "#runTotal2",
-        "#runTotal3",
-        "#runTotal4",
+        "#textEncoderRun",
+        "#textEncoder2Run",
+        "#unetRun",
+        "#runTotal",
         "#unetFetch",
         "#unetCreate",
         "#vaeFetch",
         "#vaeCreate",
-        "#vaeRun1",
-        "#vaeRun2",
-        "#vaeRun3",
-        "#vaeRun4",
+        "#vaeRun",
         "#scFetch",
         "#scCreate",
-        "#scRun1",
-        "#scRun2",
-        "#scRun3",
-        "#scRun4",
+        "#scRun",
     ];
 
     [
@@ -1119,36 +1042,18 @@ const ui = async () => {
         textEncoder2Fetch,
         textEncoderCreate,
         textEncoder2Create,
-        textEncoderRun1,
-        textEncoderRun2,
-        textEncoderRun3,
-        textEncoderRun4,
-        textEncoder2Run1,
-        textEncoder2Run2,
-        textEncoder2Run3,
-        textEncoder2Run4,
-        unetRun1,
-        unetRun2,
-        unetRun3,
-        unetRun4,
-        runTotal1,
-        runTotal2,
-        runTotal3,
-        runTotal4,
+        textEncoderRun,
+        textEncoder2Run,
+        unetRun,
+        runTotal,
         unetFetch,
         unetCreate,
         vaeFetch,
         vaeCreate,
-        vaeRun1,
-        vaeRun2,
-        vaeRun3,
-        vaeRun4,
+        vaeRun,
         scFetch,
         scCreate,
-        scRun1,
-        scRun2,
-        scRun3,
-        scRun4,
+        scRun,
     ] = elementIds.map(id => $(id));
 
     switch (config.provider) {
@@ -1260,44 +1165,22 @@ const ui = async () => {
             vaeDecoderCompileProgress = 0;
             scFetchProgress = 0;
             scCompileProgress = 0;
-            for (let i = 1; i <= batchSize; i++) {
-                $(`#data${i}`).innerHTML = "... ms";
-                $(`#data${i}`).setAttribute("class", "");
-            }
             textEncoderFetch.innerHTML = "";
             textEncoder2Fetch.innerHTML = "";
             textEncoderCreate.innerHTML = "";
             textEncoder2Create.innerHTML = "";
-            textEncoderRun1.innerHTML = "";
-            textEncoderRun2.innerHTML = "";
-            textEncoderRun3.innerHTML = "";
-            textEncoderRun4.innerHTML = "";
-            textEncoder2Run1.innerHTML = "";
-            textEncoder2Run2.innerHTML = "";
-            textEncoder2Run3.innerHTML = "";
-            textEncoder2Run4.innerHTML = "";
+            textEncoderRun.innerHTML = "";
+            textEncoder2Run.innerHTML = "";
             unetFetch.innerHTML = "";
             unetCreate.innerHTML = "";
-            unetRun1.innerHTML = "";
-            unetRun2.innerHTML = "";
-            unetRun3.innerHTML = "";
-            unetRun4.innerHTML = "";
-            vaeRun1.innerHTML = "";
-            vaeRun2.innerHTML = "";
-            vaeRun3.innerHTML = "";
-            vaeRun4.innerHTML = "";
+            unetRun.innerHTML = "";
+            vaeRun.innerHTML = "";
             scFetch.innerHTML = "";
             scCreate.innerHTML = "";
-            scRun1.innerHTML = "";
-            scRun2.innerHTML = "";
-            scRun3.innerHTML = "";
-            scRun4.innerHTML = "";
+            scRun.innerHTML = "";
             vaeFetch.innerHTML = "";
             vaeCreate.innerHTML = "";
-            runTotal1.innerHTML = "";
-            runTotal2.innerHTML = "";
-            runTotal3.innerHTML = "";
-            runTotal4.innerHTML = "";
+            runTotal.innerHTML = "";
         }
     });
 };

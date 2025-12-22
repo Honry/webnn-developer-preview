@@ -396,10 +396,7 @@
                 </div>
             </div>
             <div id="data_area" class="grid-4">
-                <div id="data1"></div>
-                <div id="data2"></div>
-                <div id="data3"></div>
-                <div id="data4"></div>
+                <div id="total_data"></div>
             </div>
             <div class="button-group key" id="buttons">
                 <textarea class="form-control" id="user-input" placeholder="Enter your prompt"></textarea>
@@ -441,18 +438,9 @@
                         <tr>
                             <td rowspan="2" id="fetch">Fetch</td>
                             <td rowspan="2" title="ONNX Runtime Session Create Time (Compilation)">Create</td>
-                            <td colspan="2">Image 1</td>
-                            <td colspan="2">Image 2</td>
-                            <td colspan="2">Image 3</td>
-                            <td colspan="2">Image 4</td>
+                            <td colspan="2">Images</td>
                         </tr>
                         <tr>
-                            <td title="ONNX Runtime Session Run Time (Inference)">Run</td>
-                            <td>Total <sup>*</sup></td>
-                            <td title="ONNX Runtime Session Run Time (Inference)">Run</td>
-                            <td>Total <sup>*</sup></td>
-                            <td title="ONNX Runtime Session Run Time (Inference)">Run</td>
-                            <td>Total <sup>*</sup></td>
                             <td title="ONNX Runtime Session Run Time (Inference)">Run</td>
                             <td>Total <sup>*</sup></td>
                         </tr>
@@ -460,50 +448,32 @@
                             <td id="textEncoder">Text Encoder</td>
                             <td id="textEncoderFetch">&nbsp;</td>
                             <td id="textEncoderCreate">&nbsp;</td>
-                            <td id="textEncoderRun1">&nbsp;</td>
-                            <td id="runTotal1" rowspan="4">&nbsp;</td>
-                            <td id="textEncoderRun2">&nbsp;</td>
-                            <td id="runTotal2" rowspan="4">&nbsp;</td>
-                            <td id="textEncoderRun3">&nbsp;</td>
-                            <td id="runTotal3" rowspan="4">&nbsp;</td>
-                            <td id="textEncoderRun4">&nbsp;</td>
-                            <td id="runTotal4" rowspan="4">&nbsp;</td>
+                            <td id="textEncoderRun">&nbsp;</td>
+                            <td id="runTotal" rowspan="4">&nbsp;</td>
                         </tr>
                         <tr>
                             <td id="textEncoder2">Text Encoder 2</td>
                             <td id="textEncoder2Fetch">&nbsp;</td>
                             <td id="textEncoder2Create">&nbsp;</td>
-                            <td id="textEncoder2Run1">&nbsp;</td>
-                            <td id="textEncoder2Run2">&nbsp;</td>
-                            <td id="textEncoder2Run3">&nbsp;</td>
-                            <td id="textEncoder2Run4">&nbsp;</td>
+                            <td id="textEncoder2Run">&nbsp;</td>
                         </tr>
                         <tr>
                             <td id="unet">UNet</td>
                             <td id="unetFetch">&nbsp;</td>
                             <td id="unetCreate">&nbsp;</td>
-                            <td id="unetRun1">&nbsp;</td>
-                            <td id="unetRun2">&nbsp;</td>
-                            <td id="unetRun3">&nbsp;</td>
-                            <td id="unetRun4">&nbsp;</td>
+                            <td id="unetRun">&nbsp;</td>
                         </tr>
                         <tr>
                             <td id="vae">VAE</td>
                             <td id="vaeFetch">&nbsp;</td>
                             <td id="vaeCreate">&nbsp;</td>
-                            <td id="vaeRun1">&nbsp;</td>
-                            <td id="vaeRun2">&nbsp;</td>
-                            <td id="vaeRun3">&nbsp;</td>
-                            <td id="vaeRun4">&nbsp;</td>
+                            <td id="vaeRun">&nbsp;</td>
                         </tr>
                         <tr id="scTr">
                             <td id="sc">Safety Checker</td>
                             <td id="scFetch">&nbsp;</td>
                             <td id="scCreate">&nbsp;</td>
-                            <td id="scRun1" colspan="2">&nbsp;</td>
-                            <td id="scRun2" colspan="2">&nbsp;</td>
-                            <td id="scRun3" colspan="2">&nbsp;</td>
-                            <td id="scRun4" colspan="2">&nbsp;</td>
+                            <td id="scRun" colspan="2">&nbsp;</td>
                         </tr>
                     </table>
                     <div>
