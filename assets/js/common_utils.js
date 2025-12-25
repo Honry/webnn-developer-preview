@@ -488,7 +488,12 @@ export function convertToFloat16OrUint16Array(fp32_array) {
 
 // Create a new ORT ML Tensor from the given parameters.
 export async function createMlTensor(mlContext, dataType, dims, writable, readable) {
-    const mlTensor = await mlContext.createTensor({ dataType, shape: dims, writable, readable });
+    const mlTensor = await mlContext.createTensor({
+        dataType: dataType === "bool" ? "uint8" : dataType,
+        shape: dims,
+        writable,
+        readable,
+    });
     // eslint-disable-next-line no-undef
     return ort.Tensor.fromMLTensor(mlTensor, { dataType, dims });
 }
