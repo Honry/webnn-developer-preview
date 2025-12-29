@@ -440,13 +440,14 @@ async function load_models(models) {
             }
             log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
             const modelBuffer = await getModelOPFS(`sdxl-turbo_${modelUrl.replace(/\//g, "_")}`, modelUrl, false);
+            const sessOpt = { ...opt, ...model.opt };
             if (model.has_external_data) {
                 const externalDataBytes = await getModelOPFS(
                     `sdxl-turbo_${modelUrl.replace(/\//g, "_")}_external`,
                     `${modelUrl}.data`,
                     false,
                 );
-                opt.externalData = [
+                sessOpt.externalData = [
                     {
                         data: externalDataBytes,
                         path: "model.onnx.data",
@@ -463,10 +464,9 @@ async function load_models(models) {
             log(`[Session Create] Beginning ${modelNameInLog}`);
 
             start = performance.now();
-            const sess_opt = { ...opt, ...model.opt };
-            console.log(sess_opt);
+            console.log(sessOpt);
 
-            models[name].sess = await ort.InferenceSession.create(modelBuffer, sess_opt);
+            models[name].sess = await ort.InferenceSession.create(modelBuffer, sessOpt);
             let createTime = (performance.now() - start).toFixed(2);
 
             if (dom[name]) {
@@ -747,6 +747,11 @@ function get_add_time_ids(height, width, batchSize = 1) {
     return data;
 }
 
+const SC_MEAN = [0.48145466, 0.4578275, 0.40821073];
+const SC_STD = [0.26862954, 0.26130258, 0.27577711];
+const SC_SCALE = SC_MEAN.map((m, i) => 0.5 / SC_STD[i]);
+const SC_OFFSET = SC_MEAN.map((m, i) => (0.5 - m) / SC_STD[i]);
+
 /**
  * Directly process VAE output for Safety Checker input.
  * Performs bilinear interpolation (resize) and normalization in one pass.
@@ -760,18 +765,6 @@ function get_add_time_ids(height, width, batchSize = 1) {
  * @param {number} dstSize - Destination image size (e.g., 224)
  */
 function get_safety_checker_feed_from_vae_output(vaeOutput, batchSize, srcSize, dstSize) {
-    const mean = [0.48145466, 0.4578275, 0.40821073];
-    const std = [0.26862954, 0.26130258, 0.27577711];
-
-    // Precompute scaling factors to go from [-1, 1] directly to Normalized
-    // val_0_1 = val_vae * 0.5 + 0.5
-    // val_norm = (val_0_1 - mean) / std
-    // val_norm = (val_vae * 0.5 + 0.5 - mean) / std
-    // val_norm = val_vae * (0.5/std) + (0.5 - mean)/std
-
-    const scale = mean.map((m, i) => 0.5 / std[i]);
-    const offset = mean.map((m, i) => (0.5 - m) / std[i]);
-
     const dstTotalSize = batchSize * 3 * dstSize * dstSize;
     const dstData = new Float32Array(dstTotalSize);
 
@@ -783,8 +776,8 @@ function get_safety_checker_feed_from_vae_output(vaeOutput, batchSize, srcSize, 
             const srcOffset = (b * 3 + c) * srcSize * srcSize;
             const dstOffset = (b * 3 + c) * dstSize * dstSize;
 
-            const cScale = scale[c];
-            const cOffset = offset[c];
+            const cScale = SC_SCALE[c];
+            const cOffset = SC_OFFSET[c];
 
             for (let y = 0; y < dstSize; y++) {
                 // Bilinear Y
@@ -860,7 +853,7 @@ function draw_image(pix, imageIndex, height, width) {
 
 async function generate_image() {
     generate.disabled = true;
-    const imgDivs = [img_div_0, img_div_1, img_div_2, img_div_3];
+    const imgDivs = $$("#image_area > div");
     imgDivs.forEach(div => div.setAttribute("class", "frame"));
 
     try {
@@ -1249,7 +1242,7 @@ const ui = async () => {
             delete models["safety_checker"];
         }
         loading = load_models(models);
-        const imgDivs = [img_div_0, img_div_1, img_div_2, img_div_3];
+        const imgDivs = $$("#image_area > div");
         imgDivs.forEach(div => div.setAttribute("class", "frame loadwave"));
         buttons.setAttribute("class", "button-group key loading");
     };
