@@ -423,7 +423,7 @@ const sizeOfShape = shape => shape.reduce((a, b) => a * b, 1);
 /*
  * load models used in the pipeline
  */
-async function load_models(models) {
+async function loadModels(models) {
     log("[Load] ONNX Runtime Execution Provider: " + config.provider);
     log("[Load] ONNX Runtime EP device type: " + config.deviceType);
     updateLoadWave(0.0);
@@ -493,8 +493,8 @@ async function load_models(models) {
     }
     updateLoadWave(100.0);
     log("[Session Create] Ready to generate images");
-    let image_area = $$("#image_area>div");
-    image_area.forEach(i => {
+    let imageArea = $$("#image_area>div");
+    imageArea.forEach(i => {
         i.setAttribute("class", "frame ready");
     });
     buttons.setAttribute("class", "button-group key loaded");
@@ -679,7 +679,7 @@ async function initializeTensors() {
     };
     // Initialize the tensors early to avoid re-allocation during execution
     writeTensor(models["unet"].feed.timestep, new Float32Array([999]));
-    writeTensor(models["unet"].feed.time_ids, get_add_time_ids(imageSize, imageSize, batchSize));
+    writeTensor(models["unet"].feed.time_ids, getAddTimeIds(imageSize, imageSize, batchSize));
     models["unet"].fetches = {
         out_sample: await createTensor(models["unet"].outputInfo.out_sample),
     };
@@ -731,17 +731,17 @@ async function runModel(model) {
  * Get the "add_time_ids" for SDXL (micro-conditioning).
  * These correspond to: [original_height, original_width, crop_top, crop_left, target_height, target_width]
  */
-function get_add_time_ids(height, width, batchSize = 1) {
+function getAddTimeIds(height, width, batchSize = 1) {
     // 1. Define the 6 basic values for the time_ids
     // [original_height, original_width, crop_top, crop_left, target_height, target_width]
-    const time_ids_base = [height, width, 0, 0, height, width];
+    const timeIdsBase = [height, width, 0, 0, height, width];
 
     // 2. Construct the data array
     // Final Shape: [batchSize, 6]
     const data = new Float32Array(batchSize * 6);
 
     for (let i = 0; i < batchSize; i++) {
-        data.set(time_ids_base, i * 6);
+        data.set(timeIdsBase, i * 6);
     }
 
     return data;
@@ -764,7 +764,7 @@ const SC_OFFSET = SC_MEAN.map((m, i) => (0.5 - m) / SC_STD[i]);
  * @param {number} srcSize - Source image size (e.g., 512)
  * @param {number} dstSize - Destination image size (e.g., 224)
  */
-function get_safety_checker_feed_from_vae_output(vaeOutput, batchSize, srcSize, dstSize) {
+function getSafetyCheckerFeedFromVaeOutput(vaeOutput, batchSize, srcSize, dstSize) {
     const dstTotalSize = batchSize * 3 * dstSize * dstSize;
     const dstData = new Float32Array(dstTotalSize);
 
@@ -825,7 +825,7 @@ function get_safety_checker_feed_from_vae_output(vaeOutput, batchSize, srcSize, 
  * @param {number} height
  * @param {number} width
  */
-function draw_image(pix, imageIndex, height, width) {
+function drawImage(pix, imageIndex, height, width) {
     const channelSize = height * width;
     const rgbaData = new Uint8ClampedArray(channelSize * 4);
 
@@ -851,7 +851,7 @@ function draw_image(pix, imageIndex, height, width) {
     }
 }
 
-async function generate_image() {
+async function generateImage() {
     generate.disabled = true;
     const imgDivs = $$("#image_area > div");
     imgDivs.forEach(div => div.setAttribute("class", "frame"));
@@ -986,7 +986,7 @@ async function generate_image() {
             const size = 3 * imageSize * imageSize;
             const offset = i * size;
             const subPix = pix.subarray(offset, offset + size);
-            draw_image(subPix, i, imageSize, imageSize);
+            drawImage(subPix, i, imageSize, imageSize);
         }
         const imageDrawTime = (performance.now() - start).toFixed(2);
         log(`[Images Drawing] drawing ${batchSize} images time: ${imageDrawTime}ms`);
@@ -1000,7 +1000,7 @@ async function generate_image() {
         if (config.safetyChecker) {
             // 1. Prepare Batch Data (Directly from VAE output)
             let scPrepStart = performance.now();
-            const feed = get_safety_checker_feed_from_vae_output(pix, batchSize, imageSize, 224);
+            const feed = getSafetyCheckerFeedFromVaeOutput(pix, batchSize, imageSize, 224);
 
             if (getMode()) {
                 log(
@@ -1230,25 +1230,25 @@ const ui = async () => {
     // Event listener for Ctrl + Enter or CMD + Enter
     prompt.addEventListener("keydown", e => {
         if (e.ctrlKey && e.key === "Enter") {
-            generate_image();
+            generateImage();
         }
     });
     generate.addEventListener("click", () => {
-        generate_image();
+        generateImage();
     });
 
-    const load_model_ui = () => {
+    const loadModelUi = () => {
         if (!config.safetyChecker) {
             delete models["safety_checker"];
         }
-        loading = load_models(models);
+        loading = loadModels(models);
         const imgDivs = $$("#image_area > div");
         imgDivs.forEach(div => div.setAttribute("class", "frame loadwave"));
         buttons.setAttribute("class", "button-group key loading");
     };
 
     load.addEventListener("click", () => {
-        load_model_ui();
+        loadModelUi();
     });
 
     ort.env.wasm.numThreads = 4;
