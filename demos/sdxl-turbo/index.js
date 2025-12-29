@@ -27,43 +27,23 @@ let mlContext;
 let gpuDevice;
 let badge;
 let memoryReleaseSwitch;
-let textEncoderFetchProgress = 0;
-let textEncoder2FetchProgress = 0;
-let unetFetchProgress = 0;
-let vaeDecoderFetchProgress = 0;
-let textEncoderCompileProgress = 0;
-let textEncoder2CompileProgress = 0;
-let unetCompileProgress = 0;
-let vaeDecoderCompileProgress = 0;
-let scFetchProgress = 0;
-let scCompileProgress = 0;
-let textEncoderFetch = null;
-let textEncoderCreate = null;
-let textEncoder2Fetch = null;
-let textEncoder2Create = null;
-let textEncoderRun = null;
-let textEncoder2Run = null;
-let unetFetch = null;
-let unetCreate = null;
-let unetRun = null;
-let vaeRun = null;
-let scFetch = null;
-let scCreate = null;
-let scRun = null;
-let vaeFetch = null;
-let vaeCreate = null;
-let runTotal = null;
+const dom = {};
+const modelDOMPrefixes = {
+    text_encoder: "textEncoder",
+    text_encoder_2: "textEncoder2",
+    unet: "unet",
+    vae_decoder: "vae",
+    safety_checker: "sc",
+};
 let generate = null;
 let load = null;
 let buttons = null;
 let loadwave = null;
 let loadwaveData = null;
-let progress = 0;
 let loading;
 let webnnStatus;
 
 const config = getConfig();
-
 const opt = {
     logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
 };
@@ -303,6 +283,74 @@ const getQueryValue = name => {
     return urlParams.get(name);
 };
 
+class ProgressManager {
+    constructor(config) {
+        this.config = config;
+        this.weights = this.getWeights(config.safetyChecker);
+        this.progress = {};
+        this.totalProgress = 0;
+
+        // Initialize progress for all models
+        for (const key in this.weights) {
+            this.progress[key] = { fetch: 0, compile: 0 };
+        }
+    }
+
+    getWeights(safetyChecker) {
+        if (safetyChecker) {
+            return {
+                text_encoder: { fetch: 5, compile: 1 },
+                text_encoder_2: { fetch: 15, compile: 4 },
+                unet: { fetch: 38, compile: 15 },
+                vae_decoder: { fetch: 3, compile: 1 },
+                safety_checker: { fetch: 17, compile: 2 },
+            };
+        } else {
+            return {
+                text_encoder: { fetch: 5, compile: 1 },
+                text_encoder_2: { fetch: 15, compile: 3 },
+                unet: { fetch: 55, compile: 17 },
+                vae_decoder: { fetch: 3, compile: 1 },
+            };
+        }
+    }
+
+    update(modelName, stage, percentage) {
+        let key = modelName;
+        if (modelName.includes("text_encoder_2")) key = "text_encoder_2";
+        else if (modelName.includes("text_encoder")) key = "text_encoder";
+        else if (modelName.includes("unet")) key = "unet";
+        else if (modelName.includes("vae_decoder")) key = "vae_decoder";
+        else if (modelName.includes("safety_checker")) key = "safety_checker";
+
+        if (!this.weights[key]) return;
+
+        this.progress[key][stage] = percentage;
+        this.calculateTotal();
+        updateLoadWave(this.totalProgress.toFixed(2));
+    }
+
+    calculateTotal() {
+        let total = 0;
+        for (const key in this.weights) {
+            const w = this.weights[key];
+            const p = this.progress[key];
+            total += (p.fetch * w.fetch) / 100;
+            total += (p.compile * w.compile) / 100;
+        }
+        this.totalProgress = total;
+    }
+
+    reset() {
+        for (const key in this.progress) {
+            this.progress[key] = { fetch: 0, compile: 0 };
+        }
+        this.totalProgress = 0;
+        updateLoadWave(0.0);
+    }
+}
+const progressManager = new ProgressManager(config);
+
 // Get model via Origin Private File System
 async function getModelOPFS(name, url, updateModel) {
     const root = await navigator.storage.getDirectory();
@@ -327,32 +375,7 @@ async function getModelOPFS(name, url, updateModel) {
         const blob = await fileHandle.getFile();
         let buffer = await blob.arrayBuffer();
         if (buffer) {
-            if (config.safetyChecker) {
-                if (name.includes("text_encoder_model")) {
-                    textEncoderFetchProgress = 5.0;
-                } else if (name.includes("text_encoder_2_model")) {
-                    textEncoder2FetchProgress = 15.0;
-                } else if (name.includes("unet")) {
-                    unetFetchProgress = 48.0;
-                } else if (name.includes("vae_decoder")) {
-                    vaeDecoderFetchProgress = 3.0;
-                } else if (name.includes("safety_checker")) {
-                    scFetchProgress = 17.0;
-                }
-            } else {
-                if (name.includes("text_encoder_model")) {
-                    textEncoderFetchProgress = 5.0;
-                } else if (name.includes("text_encoder_2_model")) {
-                    textEncoder2FetchProgress = 15.0;
-                } else if (name.includes("unet")) {
-                    unetFetchProgress = 65.0;
-                } else if (name.includes("vae_decoder")) {
-                    vaeDecoderFetchProgress = 3.0;
-                }
-            }
-
-            updateProgress();
-            updateLoadWave(progress.toFixed(2));
+            progressManager.update(name, "fetch", 100);
             return buffer;
         }
     } catch (e) {
@@ -374,33 +397,7 @@ async function readResponse(name, response) {
 
         let newLoaded = loaded + value.length;
         let fetchProgress = (newLoaded / contentLength) * 100;
-
-        if (!config.safetyChecker) {
-            if (name.includes("text_encoder_model")) {
-                textEncoderFetchProgress = 0.05 * fetchProgress;
-            } else if (name.includes("text_encoder_2_model")) {
-                textEncoder2FetchProgress = 0.15 * fetchProgress;
-            } else if (name.includes("unet")) {
-                unetFetchProgress = 0.65 * fetchProgress;
-            } else if (name.includes("vae_decoder")) {
-                vaeDecoderFetchProgress = 0.03 * fetchProgress;
-            }
-        } else {
-            if (name.includes("text_encoder_model")) {
-                textEncoderFetchProgress = 0.05 * fetchProgress;
-            } else if (name.includes("text_encoder_2_model")) {
-                textEncoder2FetchProgress = 0.15 * fetchProgress;
-            } else if (name.includes("unet")) {
-                unetFetchProgress = 0.48 * fetchProgress;
-            } else if (name.includes("vae_decoder")) {
-                vaeDecoderFetchProgress = 0.03 * fetchProgress;
-            } else if (name.includes("safety_checker")) {
-                scFetchProgress = 0.17 * fetchProgress;
-            }
-        }
-
-        updateProgress();
-        updateLoadWave(progress.toFixed(2));
+        progressManager.update(name, "fetch", fetchProgress);
 
         if (newLoaded > total) {
             total = newLoaded;
@@ -419,20 +416,6 @@ async function readResponse(name, response) {
 
 const getMode = () => {
     return getQueryValue("mode") === "normal" ? false : true;
-};
-
-const updateProgress = () => {
-    progress =
-        textEncoderFetchProgress +
-        textEncoder2FetchProgress +
-        unetFetchProgress +
-        scFetchProgress +
-        vaeDecoderFetchProgress +
-        textEncoderCompileProgress +
-        textEncoder2CompileProgress +
-        unetCompileProgress +
-        vaeDecoderCompileProgress +
-        scCompileProgress;
 };
 
 const sizeOfShape = shape => shape.reduce((a, b) => a * b, 1);
@@ -471,17 +454,11 @@ async function load_models(models) {
                 ];
             }
             let modelFetchTime = (performance.now() - start).toFixed(2);
-            if (name == "text_encoder") {
-                textEncoderFetch.innerHTML = modelFetchTime;
-            } else if (name == "text_encoder_2") {
-                textEncoder2Fetch.innerHTML = modelFetchTime;
-            } else if (name == "unet") {
-                unetFetch.innerHTML = modelFetchTime;
-            } else if (name == "vae_decoder") {
-                vaeFetch.innerHTML = modelFetchTime;
-            } else if (name == "safety_checker") {
-                scFetch.innerHTML = modelFetchTime;
+
+            if (dom[name]) {
+                dom[name].fetch.innerHTML = modelFetchTime;
             }
+
             log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
             log(`[Session Create] Beginning ${modelNameInLog}`);
 
@@ -492,40 +469,10 @@ async function load_models(models) {
             models[name].sess = await ort.InferenceSession.create(modelBuffer, sess_opt);
             let createTime = (performance.now() - start).toFixed(2);
 
-            if (config.safetyChecker) {
-                if (name == "text_encoder") {
-                    textEncoderCreate.innerHTML = createTime;
-                    textEncoderCompileProgress = 1;
-                } else if (name == "text_encoder_2") {
-                    textEncoder2Create.innerHTML = createTime;
-                    textEncoder2CompileProgress = 2;
-                } else if (name == "unet") {
-                    unetCreate.innerHTML = createTime;
-                    unetCompileProgress = 7;
-                } else if (name == "vae_decoder") {
-                    vaeCreate.innerHTML = createTime;
-                    vaeDecoderCompileProgress = 1;
-                } else if (name == "safety_checker") {
-                    scCreate.innerHTML = createTime;
-                    scCompileProgress = 2;
-                }
-            } else {
-                if (name == "text_encoder") {
-                    textEncoderCreate.innerHTML = createTime;
-                    textEncoderCompileProgress = 1;
-                } else if (name == "text_encoder_2") {
-                    textEncoder2Create.innerHTML = createTime;
-                    textEncoder2CompileProgress = 1;
-                } else if (name == "unet") {
-                    unetCreate.innerHTML = createTime;
-                    unetCompileProgress = 9;
-                } else if (name == "vae_decoder") {
-                    vaeCreate.innerHTML = createTime;
-                    vaeDecoderCompileProgress = 1;
-                }
+            if (dom[name]) {
+                dom[name].create.innerHTML = createTime;
+                progressManager.update(name, "compile", 100);
             }
-            updateProgress();
-            updateLoadWave(progress.toFixed(2));
 
             if (getMode()) {
                 log(`[Session Create] Create ${modelNameInLog} completed · ${createTime}ms`);
@@ -917,12 +864,13 @@ async function generate_image() {
     imgDivs.forEach(div => div.setAttribute("class", "frame"));
 
     try {
-        textEncoderRun.innerHTML = "";
-        textEncoder2Run.innerHTML = "";
-        unetRun.innerHTML = "";
-        vaeRun.innerHTML = "";
-        runTotal.innerHTML = "";
-        scRun.innerHTML = "";
+        for (const key in dom) {
+            if (key === "runTotal") {
+                dom[key].innerHTML = "";
+            } else {
+                dom[key].run.innerHTML = "";
+            }
+        }
 
         $("#total_data").innerHTML = "...";
         $("#total_data").setAttribute("class", "show");
@@ -952,7 +900,7 @@ async function generate_image() {
         await runModel(models["text_encoder"]);
 
         const sessionRunTimeTextEncode = (performance.now() - start).toFixed(2);
-        textEncoderRun.innerHTML = sessionRunTimeTextEncode;
+        dom["text_encoder"].run.innerHTML = sessionRunTimeTextEncode;
 
         if (getMode()) {
             log(`[Session Run] Text Encoder execution time: ${sessionRunTimeTextEncode}ms`);
@@ -973,7 +921,7 @@ async function generate_image() {
         await runModel(models["text_encoder_2"]);
 
         const sessionRunTimeTextEncode2 = (performance.now() - start).toFixed(2);
-        textEncoder2Run.innerHTML = sessionRunTimeTextEncode2;
+        dom["text_encoder_2"].run.innerHTML = sessionRunTimeTextEncode2;
 
         if (getMode()) {
             log(`[Session Run] Text Encoder 2 execution time: ${sessionRunTimeTextEncode2}ms`);
@@ -1006,7 +954,7 @@ async function generate_image() {
         await runModel(models["unet"]);
 
         const unetRunTime = (performance.now() - start).toFixed(2);
-        $(`#unetRun`).innerHTML = unetRunTime;
+        dom["unet"].run.innerHTML = unetRunTime;
 
         if (getMode()) {
             log(`[Session Run] UNet execution time: ${unetRunTime}ms`);
@@ -1033,7 +981,7 @@ async function generate_image() {
         await readTensor(models["vae_decoder"].fetches.sample, pix);
 
         let vaeRunTime = (performance.now() - start).toFixed(2);
-        $(`#vaeRun`).innerHTML = vaeRunTime;
+        dom["vae_decoder"].run.innerHTML = vaeRunTime;
         if (getMode()) {
             log(`[Session Run] VAE Decoder execution time: ${vaeRunTime}ms`);
         } else {
@@ -1054,7 +1002,7 @@ async function generate_image() {
         if (getMode()) {
             log(`[Total] Total images generation time: ${totalRunTime}ms`);
         }
-        $("#runTotal").innerHTML = totalRunTime;
+        dom.runTotal.innerHTML = totalRunTime;
 
         if (config.safetyChecker) {
             // 1. Prepare Batch Data (Directly from VAE output)
@@ -1091,7 +1039,7 @@ async function generate_image() {
                 }
             }
 
-            $("#scRun").innerHTML = totalScRunTime;
+            dom["safety_checker"].run.innerHTML = totalScRunTime;
             if (getMode()) {
                 log(`[Session Run] Safety Checker execution time (Batch ${batchSize}): ${totalScRunTime}ms`);
             }
@@ -1226,43 +1174,14 @@ const ui = async () => {
     }
     await checkWebNN();
 
-    const elementIds = [
-        "#textEncoderFetch",
-        "#textEncoderCreate",
-        "#textEncoder2Fetch",
-        "#textEncoder2Create",
-        "#textEncoderRun",
-        "#textEncoder2Run",
-        "#unetRun",
-        "#runTotal",
-        "#unetFetch",
-        "#unetCreate",
-        "#vaeFetch",
-        "#vaeCreate",
-        "#vaeRun",
-        "#scFetch",
-        "#scCreate",
-        "#scRun",
-    ];
-
-    [
-        textEncoderFetch,
-        textEncoder2Fetch,
-        textEncoderCreate,
-        textEncoder2Create,
-        textEncoderRun,
-        textEncoder2Run,
-        unetRun,
-        runTotal,
-        unetFetch,
-        unetCreate,
-        vaeFetch,
-        vaeCreate,
-        vaeRun,
-        scFetch,
-        scCreate,
-        scRun,
-    ] = elementIds.map(id => $(id));
+    for (const [modelName, prefix] of Object.entries(modelDOMPrefixes)) {
+        dom[modelName] = {
+            fetch: $(`#${prefix}Fetch`),
+            create: $(`#${prefix}Create`),
+            run: $(`#${prefix}Run`),
+        };
+    }
+    dom.runTotal = $("#runTotal");
 
     opt.executionProviders = [config.provider];
     switch (config.provider) {
@@ -1370,32 +1289,16 @@ const ui = async () => {
             updateLoadWave(0.0);
             const imgDivs = [img_div_0, img_div_1, img_div_2, img_div_3];
             imgDivs.forEach(div => div.setAttribute("class", "frame"));
-            textEncoderFetchProgress = 0;
-            textEncoder2FetchProgress = 0;
-            unetFetchProgress = 0;
-            vaeDecoderFetchProgress = 0;
-            textEncoderCompileProgress = 0;
-            textEncoder2CompileProgress = 0;
-            unetCompileProgress = 0;
-            vaeDecoderCompileProgress = 0;
-            scFetchProgress = 0;
-            scCompileProgress = 0;
-            textEncoderFetch.innerHTML = "";
-            textEncoder2Fetch.innerHTML = "";
-            textEncoderCreate.innerHTML = "";
-            textEncoder2Create.innerHTML = "";
-            textEncoderRun.innerHTML = "";
-            textEncoder2Run.innerHTML = "";
-            unetFetch.innerHTML = "";
-            unetCreate.innerHTML = "";
-            unetRun.innerHTML = "";
-            vaeRun.innerHTML = "";
-            scFetch.innerHTML = "";
-            scCreate.innerHTML = "";
-            scRun.innerHTML = "";
-            vaeFetch.innerHTML = "";
-            vaeCreate.innerHTML = "";
-            runTotal.innerHTML = "";
+            progressManager.reset();
+            for (const key in dom) {
+                if (key === "runTotal") {
+                    dom[key].innerHTML = "";
+                } else {
+                    dom[key].fetch.innerHTML = "";
+                    dom[key].create.innerHTML = "";
+                    dom[key].run.innerHTML = "";
+                }
+            }
         }
     });
 };
