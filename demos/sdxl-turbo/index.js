@@ -764,28 +764,27 @@ function getSafetyCheckerFeedFromVaeOutput(vaeOutput, batchSize, srcSize, dstSiz
     const dstTotalSize = batchSize * 3 * dstSize * dstSize;
     const dstData = new TypedArray(dstTotalSize);
 
-    const xRatio = srcSize / dstSize;
-    const yRatio = srcSize / dstSize;
+    const ratio = srcSize / dstSize;
 
     // Pre-calculate interpolation weights and indices
     const yIndices = new Int32Array(dstSize * 2); // [y0, y1]
     const yWeights = new TypedArray(dstSize); // yWeight
-    for (let y = 0; y < dstSize; y++) {
-        const ySrc = y * yRatio;
-        const y0 = Math.floor(ySrc);
-        yIndices[y * 2] = y0;
-        yIndices[y * 2 + 1] = Math.min(y0 + 1, srcSize - 1);
-        yWeights[y] = ySrc - y0;
-    }
-
     const xIndices = new Int32Array(dstSize * 2); // [x0, x1]
     const xWeights = new TypedArray(dstSize); // xWeight
-    for (let x = 0; x < dstSize; x++) {
-        const xSrc = x * xRatio;
-        const x0 = Math.floor(xSrc);
-        xIndices[x * 2] = x0;
-        xIndices[x * 2 + 1] = Math.min(x0 + 1, srcSize - 1);
-        xWeights[x] = xSrc - x0;
+
+    for (let i = 0; i < dstSize; i++) {
+        const src = i * ratio;
+        const p0 = Math.floor(src);
+        const p1 = Math.min(p0 + 1, srcSize - 1);
+        const w = src - p0;
+
+        yIndices[i * 2] = p0;
+        yIndices[i * 2 + 1] = p1;
+        yWeights[i] = w;
+
+        xIndices[i * 2] = p0;
+        xIndices[i * 2 + 1] = p1;
+        xWeights[i] = w;
     }
 
     for (let b = 0; b < batchSize; b++) {
@@ -800,27 +799,30 @@ function getSafetyCheckerFeedFromVaeOutput(vaeOutput, batchSize, srcSize, dstSiz
                 const y0 = yIndices[y * 2];
                 const y1 = yIndices[y * 2 + 1];
                 const yWeight = yWeights[y];
+                const invYWeight = 1.0 - yWeight;
+
+                const srcRow0 = srcOffset + y0 * srcSize;
+                const srcRow1 = srcOffset + y1 * srcSize;
+                const dstRow = dstOffset + y * dstSize;
 
                 for (let x = 0; x < dstSize; x++) {
                     const x0 = xIndices[x * 2];
                     const x1 = xIndices[x * 2 + 1];
                     const xWeight = xWeights[x];
+                    const invXWeight = 1.0 - xWeight;
 
                     // Fetch 4 neighbors
-                    const p00 = vaeOutput[srcOffset + y0 * srcSize + x0];
-                    const p01 = vaeOutput[srcOffset + y0 * srcSize + x1];
-                    const p10 = vaeOutput[srcOffset + y1 * srcSize + x0];
-                    const p11 = vaeOutput[srcOffset + y1 * srcSize + x1];
+                    const p00 = vaeOutput[srcRow0 + x0];
+                    const p01 = vaeOutput[srcRow0 + x1];
+                    const p10 = vaeOutput[srcRow1 + x0];
+                    const p11 = vaeOutput[srcRow1 + x1];
 
                     // Interpolate
                     const val =
-                        p00 * (1 - xWeight) * (1 - yWeight) +
-                        p01 * xWeight * (1 - yWeight) +
-                        p10 * (1 - xWeight) * yWeight +
-                        p11 * xWeight * yWeight;
+                        (p00 * invXWeight + p01 * xWeight) * invYWeight + (p10 * invXWeight + p11 * xWeight) * yWeight;
 
                     // Normalize and store
-                    dstData[dstOffset + y * dstSize + x] = val * cScale + cOffset;
+                    dstData[dstRow + x] = val * cScale + cOffset;
                 }
             }
         }
