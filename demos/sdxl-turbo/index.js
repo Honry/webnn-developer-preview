@@ -202,8 +202,7 @@ const models = {
     },
     vae_decoder: {
         name: "VAE Decoder",
-        url: "vae_decoder/model_all_fp16.onnx",
-        // url: "vae_decoder/model.onnx",
+        url: "vae_decoder/model.onnx",
         has_external_data: true,
         size: "96.2MB",
         opt: {
@@ -873,13 +872,8 @@ async function generateImage() {
     imgDivs.forEach(div => div.setAttribute("class", "frame"));
 
     try {
-        for (const key in dom) {
-            if (key === "runTotal") {
-                dom[key].innerHTML = "";
-            } else {
-                dom[key].run.innerHTML = "";
-            }
-        }
+        dom["runTotal"].innerHTML = "";
+        dom["safety_checker"].run.innerHTML = "";
 
         $("#total_data").innerHTML = "...";
         $("#total_data").setAttribute("class", "show");
@@ -910,7 +904,6 @@ async function generateImage() {
         await runModel(models["text_encoder"]);
 
         const sessionRunTimeTextEncode = (performance.now() - start).toFixed(2);
-        dom["text_encoder"].run.innerHTML = sessionRunTimeTextEncode;
 
         if (getMode()) {
             log(`[Session Run] Text Encoder execution time: ${sessionRunTimeTextEncode}ms`);
@@ -931,7 +924,6 @@ async function generateImage() {
         await runModel(models["text_encoder_2"]);
 
         const sessionRunTimeTextEncode2 = (performance.now() - start).toFixed(2);
-        dom["text_encoder_2"].run.innerHTML = sessionRunTimeTextEncode2;
 
         if (getMode()) {
             log(`[Session Run] Text Encoder 2 execution time: ${sessionRunTimeTextEncode2}ms`);
@@ -962,9 +954,7 @@ async function generateImage() {
         // Run UNet
         start = performance.now();
         await runModel(models["unet"]);
-
         const unetRunTime = (performance.now() - start).toFixed(2);
-        dom["unet"].run.innerHTML = unetRunTime;
 
         if (getMode()) {
             log(`[Session Run] UNet execution time: ${unetRunTime}ms`);
@@ -992,7 +982,7 @@ async function generateImage() {
         await readTensor(models["vae_decoder"].fetches.sample, pix);
 
         let vaeRunTime = (performance.now() - start).toFixed(2);
-        dom["vae_decoder"].run.innerHTML = vaeRunTime;
+
         if (getMode()) {
             log(`[Session Run] VAE Decoder execution time: ${vaeRunTime}ms`);
         } else {
@@ -1164,6 +1154,7 @@ const ui = async () => {
     load = $("#load");
     generate = $("#generate");
     buttons = $("#buttons");
+    $("#imagesTd").innerHTML = `Images x ${batchSize}`;
 
     memoryReleaseSwitch.addEventListener("change", () => {
         if (memoryReleaseSwitch.checked) {
@@ -1307,7 +1298,9 @@ const ui = async () => {
                 } else {
                     dom[key].fetch.innerHTML = "";
                     dom[key].create.innerHTML = "";
-                    dom[key].run.innerHTML = "";
+                    if (dom[key].run) {
+                        dom[key].run.innerHTML = "";
+                    }
                 }
             }
         }

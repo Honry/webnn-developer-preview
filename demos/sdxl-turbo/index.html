@@ -431,43 +431,38 @@
                 <div id="data" class="footerinfo">
                     <table>
                         <tr>
-                            <th rowspan="3" id="sdxlTurbo">SDXL Turbo<br />(ms)</th>
+                            <th rowspan="3" id="tdTurbo">SDXL Turbo<br />(ms)</th>
                             <th colspan="2">Load</th>
                             <th colspan="8">Execution</th>
                         </tr>
                         <tr>
                             <td rowspan="2" id="fetch">Fetch</td>
                             <td rowspan="2" title="ONNX Runtime Session Create Time (Compilation)">Create</td>
-                            <td colspan="2">Images</td>
+                            <td colspan="2" id="imagesTd">Images</td>
                         </tr>
                         <tr>
-                            <td title="ONNX Runtime Session Run Time (Inference)">Run</td>
                             <td>Total <sup>*</sup></td>
                         </tr>
                         <tr>
                             <td id="textEncoder">Text Encoder</td>
                             <td id="textEncoderFetch">&nbsp;</td>
                             <td id="textEncoderCreate">&nbsp;</td>
-                            <td id="textEncoderRun">&nbsp;</td>
                             <td id="runTotal" rowspan="4">&nbsp;</td>
                         </tr>
                         <tr>
                             <td id="textEncoder2">Text Encoder 2</td>
                             <td id="textEncoder2Fetch">&nbsp;</td>
                             <td id="textEncoder2Create">&nbsp;</td>
-                            <td id="textEncoder2Run">&nbsp;</td>
                         </tr>
                         <tr>
                             <td id="unet">UNet</td>
                             <td id="unetFetch">&nbsp;</td>
                             <td id="unetCreate">&nbsp;</td>
-                            <td id="unetRun">&nbsp;</td>
                         </tr>
                         <tr>
                             <td id="vae">VAE</td>
                             <td id="vaeFetch">&nbsp;</td>
                             <td id="vaeCreate">&nbsp;</td>
-                            <td id="vaeRun">&nbsp;</td>
                         </tr>
                         <tr id="scTr">
                             <td id="sc">Safety Checker</td>
