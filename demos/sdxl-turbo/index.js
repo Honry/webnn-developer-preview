@@ -202,7 +202,8 @@ const models = {
     },
     vae_decoder: {
         name: "VAE Decoder",
-        url: "vae_decoder/model.onnx",
+        url: "vae_decoder/model_all_fp16.onnx",
+        // url: "vae_decoder/model.onnx",
         has_external_data: true,
         size: "96.2MB",
         opt: {
@@ -430,69 +431,69 @@ async function loadModels(models) {
     log("[Load] ONNX Runtime EP device type: " + config.deviceType);
     updateLoadWave(0.0);
     load.disabled = true;
-    // try {
-    for (const [name, model] of Object.entries(models)) {
-        const modelNameInLog = model.name;
-        let start = performance.now();
-        let modelUrl = `${config.model + (config.useFp16IO ? "-fp16" : "") + (config.useQdq ? "-qdq" : "")}/${model.url}`;
-        if (modelUrl.includes("huggingface.co")) {
-            await getHuggingFaceDomain().then(domain => {
-                modelUrl = modelUrl.replace("huggingface.co", domain);
-            });
+    try {
+        for (const [name, model] of Object.entries(models)) {
+            const modelNameInLog = model.name;
+            let start = performance.now();
+            let modelUrl = `${config.model + (config.useFp16IO ? "-fp16" : "") + (config.useQdq ? "-qdq" : "")}/${model.url}`;
+            if (modelUrl.includes("huggingface.co")) {
+                await getHuggingFaceDomain().then(domain => {
+                    modelUrl = modelUrl.replace("huggingface.co", domain);
+                });
+            }
+            log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
+            const modelBuffer = await getModelOPFS(`sdxl-turbo_${modelUrl.replace(/\//g, "_")}`, modelUrl, false);
+            const sessOpt = { ...opt, ...model.opt };
+            if (model.has_external_data) {
+                const externalDataBytes = await getModelOPFS(
+                    `sdxl-turbo_${modelUrl.replace(/\//g, "_")}_external`,
+                    `${modelUrl}.data`,
+                    false,
+                );
+                sessOpt.externalData = [
+                    {
+                        data: externalDataBytes,
+                        path: "model.onnx.data",
+                    },
+                ];
+            }
+            let modelFetchTime = (performance.now() - start).toFixed(2);
+
+            if (dom[name]) {
+                dom[name].fetch.innerHTML = modelFetchTime;
+            }
+
+            log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
+            log(`[Session Create] Beginning ${modelNameInLog}`);
+
+            start = performance.now();
+            console.log(sessOpt);
+
+            models[name].sess = await ort.InferenceSession.create(modelBuffer, sessOpt);
+            let createTime = (performance.now() - start).toFixed(2);
+
+            if (dom[name]) {
+                dom[name].create.innerHTML = createTime;
+                progressManager.update(name, "compile", 100);
+            }
+
+            if (getMode()) {
+                log(`[Session Create] Create ${modelNameInLog} completed · ${createTime}ms`);
+            } else {
+                log(`[Session Create] Create ${modelNameInLog} completed`);
+            }
         }
-        log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
-        const modelBuffer = await getModelOPFS(`sdxl-turbo_${modelUrl.replace(/\//g, "_")}`, modelUrl, false);
-        const sessOpt = { ...opt, ...model.opt };
-        if (model.has_external_data) {
-            const externalDataBytes = await getModelOPFS(
-                `sdxl-turbo_${modelUrl.replace(/\//g, "_")}_external`,
-                `${modelUrl}.data`,
-                false,
-            );
-            sessOpt.externalData = [
-                {
-                    data: externalDataBytes,
-                    path: "model.onnx.data",
-                },
-            ];
+
+        if (config.provider === "webgpu") {
+            gpuDevice = ort.env.webgpu.device;
         }
-        let modelFetchTime = (performance.now() - start).toFixed(2);
-
-        if (dom[name]) {
-            dom[name].fetch.innerHTML = modelFetchTime;
-        }
-
-        log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
-        log(`[Session Create] Beginning ${modelNameInLog}`);
-
-        start = performance.now();
-        console.log(sessOpt);
-
-        models[name].sess = await ort.InferenceSession.create(modelBuffer, sessOpt);
-        let createTime = (performance.now() - start).toFixed(2);
-
-        if (dom[name]) {
-            dom[name].create.innerHTML = createTime;
-            progressManager.update(name, "compile", 100);
-        }
-
-        if (getMode()) {
-            log(`[Session Create] Create ${modelNameInLog} completed · ${createTime}ms`);
-        } else {
-            log(`[Session Create] Create ${modelNameInLog} completed`);
-        }
+        const startInitTensors = performance.now();
+        await initializeTensors();
+        log(`[Session Create] Initialize tensors completed · ${(performance.now() - startInitTensors).toFixed(2)}ms`);
+    } catch (e) {
+        logError(`[Load] failed, ${e}`);
+        return;
     }
-
-    if (config.provider === "webgpu") {
-        gpuDevice = ort.env.webgpu.device;
-    }
-    const startInitTensors = performance.now();
-    await initializeTensors();
-    log(`[Session Create] Initialize tensors completed · ${(performance.now() - startInitTensors).toFixed(2)}ms`);
-    // } catch (e) {
-    //     logError(`[Load] failed, ${e}`);
-    //     return;
-    // }
     updateLoadWave(100.0);
     log("[Session Create] Ready to generate images");
     let imageArea = $$("#image_area>div");
@@ -1236,14 +1237,14 @@ const ui = async () => {
         document.body.setAttribute("class", "npu");
     }
 
-    // prompt.value = "A cinematic shot of a baby racoon wearing an intricate italian priest robe.";
+    prompt.value = "A cinematic shot of a baby racoon wearing an intricate italian priest robe.";
     // prompt.value =
     // "a cat under the snow with blue eyes, covered by snow, cinematic style, medium shot, professional photo, high detail, 8k";
-    prompt.value =
-        "A scene mountain landscape at sunrise, soft golden light, clear sky, very detailed, photo-realistic style." +
-        " Add a crystal clear lake reflecting the mountain." +
-        " Add a wooden cabin near the shore." +
-        " Surround the cabin with tall palm and coconut trees.";
+    // prompt.value =
+    //     "A scene mountain landscape at sunrise, soft golden light, clear sky, very detailed, photo-realistic style." +
+    //     " Add a crystal clear lake reflecting the mountain." +
+    //     " Add a wooden cabin near the shore." +
+    //     " Surround the cabin with tall palm and coconut trees.";
     // Event listener for Ctrl + Enter or CMD + Enter
     prompt.addEventListener("keydown", e => {
         if (e.ctrlKey && e.key === "Enter") {
