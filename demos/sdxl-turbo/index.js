@@ -6,6 +6,11 @@
 //
 
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers/dist/transformers.js";
+
+env.localModelPath = "models/";
+env.allowRemoteModels = true;
+env.allowLocalModels = true;
+
 import {
     $,
     $$,
@@ -14,8 +19,6 @@ import {
     setupORT,
     showCompatibleChromiumVersion,
     getHuggingFaceDomain,
-    remapHuggingFaceDomainIfNeeded,
-    checkRemoteEnvironment,
     createMlTensor,
     createGpuTensor,
     readBackMLTensor,
@@ -49,13 +52,9 @@ const opt = {
     logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
 };
 
-let tokenizerPath = "../../demos/sdxl-turbo/models/tokenizer";
-if (checkRemoteEnvironment()) {
-    tokenizerPath = "webnn/sdxl-turbo-webnn";
-    await remapHuggingFaceDomainIfNeeded(env);
-}
-const tokenizer = await AutoTokenizer.from_pretrained(tokenizerPath);
-const tokenizer2 = await AutoTokenizer.from_pretrained(tokenizerPath + "_2");
+// Always use local/relative paths for tokenizers, as they are small enough to be hosted on GitHub Pages
+const tokenizer = await AutoTokenizer.from_pretrained("tokenizer");
+const tokenizer2 = await AutoTokenizer.from_pretrained("tokenizer_2");
 
 const batchSize = config.images;
 const imageSize = 512;
@@ -238,9 +237,7 @@ const models = {
 function getConfig() {
     const queryParams = new URLSearchParams(window.location.search);
     const config = {
-        model: location.href.includes("github.io")
-            ? "https://huggingface.co/webnn/sdxl-turbo-webnn/resolve/main"
-            : "models",
+        model: location.href.includes("github.io") ? "https://huggingface.co/webnn/sdxl-turbo/resolve/main" : "models",
         mode: "none",
         safetyChecker: true,
         provider: "webnn",

@@ -40,24 +40,52 @@ const models = [
         path: "./demos/sd-turbo/models/safety_checker",
     },
     {
-        url: "microsoft/sdxl-turbo-webnn/resolve/main/text_encoder/model.onnx",
-        path: "./demos/sdxl-turbo/models/text_encoder",
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/text_encoder_model_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
     },
     {
-        url: "microsoft/sdxl-turbo-webnn/resolve/main/text_encoder_2/model.onnx",
-        path: "./demos/sdxl-turbo/models/text_encoder_2",
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/text_encoder_model_qdq_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
     },
     {
-        url: "microsoft/sdxl-turbo-webnn/resolve/main/unet/model.onnx",
-        path: "./demos/sdxl-turbo/models/unet",
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/text_encoder_2_model_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
     },
     {
-        url: "microsoft/sdxl-turbo-webnn/resolve/main/vae_decoder/model.onnx",
-        path: "./demos/sdxl-turbo/models/vae_decoder",
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/text_encoder_2_model_qdq_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
     },
     {
-        url: "microsoft/sd-turbo-webnn/resolve/main/safety_checker/safety_checker_int32_reduceSum.onnx",
-        path: "./demos/sdxl-turbo/models/safety_checker",
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/unet_model_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
+    },
+    {
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/unet_model_qdq_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
+    },
+    {
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/vae_decoder_model_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
+    },
+    {
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/vae_decoder_model_qdq_q4f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
+    },
+    {
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/safety_checker_model_f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
+    },
+    {
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/concat_model_f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
+    },
+    {
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/latents_model_f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
+    },
+    {
+        url: "microsoft/sdxl-turbo/resolve/main/onnx/scheduler_model_f16.onnx",
+        path: "./demos/sdxl-turbo/models/onnx",
     },
     {
         url: "microsoft/stable-diffusion-v1.5-webnn/resolve/main/text-encoder.onnx",
