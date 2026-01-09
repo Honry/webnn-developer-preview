@@ -42,23 +42,21 @@ let loading;
 let webnnStatus;
 
 const config = getConfig();
-const dataType = config.useFp16IO ? "float16" : "float32";
-const TypedArray = dataType === "float16" ? Float16Array : Float32Array;
+const dataType = "float16";
 const opt = {
     logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
 };
 
-const path = "../../demos/sdxl-turbo/models/tokenizer";
-const tokenizer = await AutoTokenizer.from_pretrained(path);
-const tokenizer2 = await AutoTokenizer.from_pretrained(path + "_2");
+const tokenizerPath = "../../demos/sdxl-turbo/models/tokenizer";
+const tokenizer = await AutoTokenizer.from_pretrained(tokenizerPath);
+const tokenizer2 = await AutoTokenizer.from_pretrained(tokenizerPath + "_2");
 
 const batchSize = config.images;
 const imageSize = 512;
 const models = {
     text_encoder: {
         name: "Text Encoder",
-        url: `text_encoder/model${config.usePrunedModels ? "_pruned" : ""}.onnx`,
-        has_external_data: true,
+        url: `text_encoder_model_${config.useQdq ? "qdq_" : ""}q4f16.onnx`,
         size: "118MB",
         opt: {
             freeDimensionOverrides: {
@@ -75,8 +73,7 @@ const models = {
     },
     text_encoder_2: {
         name: "Text Encoder 2",
-        url: `text_encoder_2/model${config.usePrunedModels ? "_pruned" : ""}.onnx`,
-        has_external_data: true,
+        url: `text_encoder_2_model_${config.useQdq ? "qdq_" : ""}q4f16.onnx`,
         size: "461MB",
         opt: {
             freeDimensionOverrides: {
@@ -95,8 +92,7 @@ const models = {
     concat: {
         // A small model to concat the two text encoder outputs.
         name: "Concat Model",
-        url: "concat/model.onnx",
-        has_external_data: false,
+        url: `concat_model_f16.onnx`,
         size: "1KB",
         opt: {
             freeDimensionOverrides: {
@@ -118,8 +114,7 @@ const models = {
     latents: {
         // A small model to handle latents scaling.
         name: "Latents Model",
-        url: "latents/model.onnx",
-        has_external_data: false,
+        url: "latents_model_f16.onnx",
         size: "1KB",
         opt: {
             freeDimensionOverrides: {
@@ -143,8 +138,7 @@ const models = {
     },
     unet: {
         name: "UNet",
-        url: "unet/model.onnx",
-        has_external_data: false,
+        url: `unet_model_${config.useQdq ? "qdq_" : ""}q4f16.onnx`,
         size: "1.83GB",
         opt: {
             freeDimensionOverrides: {
@@ -175,8 +169,7 @@ const models = {
     scheduler: {
         // A small model to perform scheduler calculations.
         name: "Scheduler Model",
-        url: "scheduler/model.onnx",
-        has_external_data: false,
+        url: "scheduler_model_f16.onnx",
         size: "1KB",
         opt: {
             freeDimensionOverrides: {
@@ -196,9 +189,8 @@ const models = {
     },
     vae_decoder: {
         name: "VAE Decoder",
-        url: "vae_decoder/model.onnx",
-        has_external_data: true,
-        size: "96.2MB",
+        url: `vae_decoder_model_${config.useQdq ? "qdq_" : ""}q4f16.onnx`,
+        size: "93MB",
         opt: {
             freeDimensionOverrides: {
                 batch_size: batchSize,
@@ -216,9 +208,7 @@ const models = {
     },
     safety_checker: {
         name: "Safety Checker",
-        // url: "safety_checker/safety_checker_int32_reduceSum.onnx",
-        url: "safety_checker/safety_checker_int32_reduceSum_no_images_input.onnx",
-        has_external_data: false,
+        url: "safety_checker_model_f16.onnx",
         size: "580MB",
         opt: {
             freeDimensionOverrides: {
@@ -243,16 +233,16 @@ function getConfig() {
     const queryParams = new URLSearchParams(window.location.search);
     const config = {
         model: location.href.includes("github.io")
-            ? "https://huggingface.co/microsoft/sdxl-turbo-webnn/resolve/main"
+            ? "https://huggingface.co/webnn/sdxl-turbo-webnn/resolve/main"
             : "models",
         mode: "none",
         safetyChecker: true,
         provider: "webnn",
         deviceType: "gpu",
-        useQdq: false,
-        useIOBinding: false,
-        usePrunedModels: false,
-        useFp16IO: false,
+        // use QDQ models by default
+        // Fix me: set useQdq to true once WebNN OV backend supports MatMulNBits well
+        useQdq: true,
+        useIOBinding: true,
         images: 4,
         verbose: false,
     };
@@ -271,6 +261,10 @@ function getConfig() {
         }
     }
 
+    if (config.provider === "webgpu" && config.useQdq) {
+        // WebGPU EP does not support INT4 QDQ model well yet.
+        config.useQdq = false;
+    }
     return config;
 }
 
@@ -428,7 +422,7 @@ async function loadModels(models) {
         for (const [name, model] of Object.entries(models)) {
             const modelNameInLog = model.name;
             let start = performance.now();
-            let modelUrl = `${config.model + (config.useFp16IO ? "-fp16" : "") + (config.useQdq ? "-qdq" : "")}/${model.url}`;
+            let modelUrl = `${config.model}/onnx/${model.url}`;
             if (modelUrl.includes("huggingface.co")) {
                 await getHuggingFaceDomain().then(domain => {
                     modelUrl = modelUrl.replace("huggingface.co", domain);
@@ -437,19 +431,6 @@ async function loadModels(models) {
             log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
             const modelBuffer = await getModelOPFS(`sdxl-turbo_${modelUrl.replace(/\//g, "_")}`, modelUrl, false);
             const sessOpt = { ...opt, ...model.opt };
-            if (model.has_external_data) {
-                const externalDataBytes = await getModelOPFS(
-                    `sdxl-turbo_${modelUrl.replace(/\//g, "_")}_external`,
-                    `${modelUrl}.data`,
-                    false,
-                );
-                sessOpt.externalData = [
-                    {
-                        data: externalDataBytes,
-                        path: "model.onnx.data",
-                    },
-                ];
-            }
             let modelFetchTime = (performance.now() - start).toFixed(2);
 
             if (dom[name]) {
@@ -668,7 +649,7 @@ async function initializeTensors() {
         time_ids: await createTensor(models["unet"].inputInfo.time_ids),
     };
     // Initialize the tensors early to avoid re-allocation during execution
-    writeTensor(models["unet"].feed.timestep, new TypedArray([999]));
+    writeTensor(models["unet"].feed.timestep, new Float16Array([999]));
     writeTensor(models["unet"].feed.time_ids, getAddTimeIds(imageSize, imageSize, batchSize));
     models["unet"].fetches = {
         out_sample: await createTensor(models["unet"].outputInfo.out_sample),
@@ -728,7 +709,7 @@ function getAddTimeIds(height, width, batchSize = 1) {
 
     // 2. Construct the data array
     // Final Shape: [batchSize, 6]
-    const data = new TypedArray(batchSize * 6);
+    const data = new Float16Array(batchSize * 6);
 
     for (let i = 0; i < batchSize; i++) {
         data.set(timeIdsBase, i * 6);
@@ -756,15 +737,15 @@ const SC_OFFSET = SC_MEAN.map((m, i) => (0.5 - m) / SC_STD[i]);
  */
 function getSafetyCheckerFeedFromVaeOutput(vaeOutput, batchSize, srcSize, dstSize) {
     const dstTotalSize = batchSize * 3 * dstSize * dstSize;
-    const dstData = new TypedArray(dstTotalSize);
+    const dstData = new Float16Array(dstTotalSize);
 
     const ratio = srcSize / dstSize;
 
     // Pre-calculate interpolation weights and indices
     const yIndices = new Int32Array(dstSize * 2); // [y0, y1]
-    const yWeights = new TypedArray(dstSize); // yWeight
+    const yWeights = new Float16Array(dstSize); // yWeight
     const xIndices = new Int32Array(dstSize * 2); // [x0, x1]
-    const xWeights = new TypedArray(dstSize); // xWeight
+    const xWeights = new Float16Array(dstSize); // xWeight
 
     for (let i = 0; i < dstSize; i++) {
         const src = i * ratio;
@@ -972,7 +953,7 @@ async function generateImage() {
         await runModel(models["vae_decoder"]);
 
         const pixSize = sizeOfShape(models["vae_decoder"].outputInfo.sample.dims);
-        let pix = new TypedArray(pixSize);
+        let pix = new Float16Array(pixSize);
         await readTensor(models["vae_decoder"].fetches.sample, pix);
 
         let vaeRunTime = (performance.now() - start).toFixed(2);
@@ -1222,14 +1203,9 @@ const ui = async () => {
         document.body.setAttribute("class", "npu");
     }
 
-    prompt.value = "A cinematic shot of a baby racoon wearing an intricate italian priest robe.";
-    // prompt.value =
-    // "a cat under the snow with blue eyes, covered by snow, cinematic style, medium shot, professional photo, high detail, 8k";
-    // prompt.value =
-    //     "A scene mountain landscape at sunrise, soft golden light, clear sky, very detailed, photo-realistic style." +
-    //     " Add a crystal clear lake reflecting the mountain." +
-    //     " Add a wooden cabin near the shore." +
-    //     " Surround the cabin with tall palm and coconut trees.";
+    prompt.value =
+        "An artistic baby raccoon DJ in a vintage suit, adjusting knobs on a futuristic mixer. The scene is a dim nightclub with vibrant lights and soft bokeh. Highly detailed, cinematic style.";
+
     // Event listener for Ctrl + Enter or CMD + Enter
     prompt.addEventListener("keydown", e => {
         if (e.ctrlKey && e.key === "Enter") {
