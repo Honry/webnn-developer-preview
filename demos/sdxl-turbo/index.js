@@ -5,7 +5,7 @@
 // An example how to run sdxl-turbo with webnn in onnxruntime-web.
 //
 
-import { AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@xenova/transformers/dist/transformers.js";
+import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers/dist/transformers.js";
 import {
     $,
     $$,
@@ -14,6 +14,8 @@ import {
     setupORT,
     showCompatibleChromiumVersion,
     getHuggingFaceDomain,
+    remapHuggingFaceDomainIfNeeded,
+    checkRemoteEnvironment,
     createMlTensor,
     createGpuTensor,
     readBackMLTensor,
@@ -47,7 +49,11 @@ const opt = {
     logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
 };
 
-const tokenizerPath = "../../demos/sdxl-turbo/models/tokenizer";
+let tokenizerPath = "../../demos/sdxl-turbo/models/tokenizer";
+if (checkRemoteEnvironment()) {
+    tokenizerPath = "webnn/sdxl-turbo-webnn";
+    await remapHuggingFaceDomainIfNeeded(env);
+}
 const tokenizer = await AutoTokenizer.from_pretrained(tokenizerPath);
 const tokenizer2 = await AutoTokenizer.from_pretrained(tokenizerPath + "_2");
 
