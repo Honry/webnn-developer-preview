@@ -61,13 +61,12 @@ const imageWidth = 512;
 const models = {
     text_encoder: {
         name: "Text Encoder",
-        url: `z_image_turbo_onnx/text_encoder/${config.useQdq ? "qdq" : ""}q4f16/model.onnx`,
+        url: `z_image_turbo_onnx/text_encoder/${config.useQdq ? "qdq-" : ""}q4f16${!config.useQdq ? "-genai" : ""}/model.onnx`,
         size: "118MB",
         // input: NodeArg(name='input_ids', type='tensor(int64)', shape=['batch_size', 'sequence_length'])
         // input: NodeArg(name='attention_mask', type='tensor(int64)', shape=['batch_size', 'sequence_length'])
-        // input: NodeArg(name='position_ids', type='tensor(int64)', shape=['batch_size', 'sequence_length'])
         // output: NodeArg(name='logits', type='tensor(float)', shape=['batch_size', 'sequence_length', 151936])
-        // output: NodeArg(name='/model/layers.34/Add_1_output_0', type='tensor(float)', shape=['batch_size', 'sequence_length', 2560])
+        // output: NodeArg(name='encoder_hidden_state', type='tensor(float)', shape=['batch_size', 'sequence_length', 2560])
         opt: {
             freeDimensionOverrides: {
                 batch_size: batchSize,
@@ -77,12 +76,9 @@ const models = {
         inputInfo: {
             // input_ids: { dataType: "int64", dims: [batchSize, 512], writable: true },
             // attention_mask: { dataType: "int64", dims: [batchSize, 512], writable: true },
-            // position_ids: { dataType: "int64", dims: [batchSize, 512], writable: true },
         },
         outputInfo: {
-            // TODO: logits is not used, can be removed from model, and prune the last attention layer
-            logits: { dataType: dataType, dims: [batchSize, 512, 151936] },
-            // "/model/layers.34/Add_1_output_0": { dataType: dataType, dims: [batchSize, 512, 2560] },
+            // "encoder_hidden_state": { dataType: dataType, dims: [batchSize, 512, 2560] },
         },
     },
     transformer: {
@@ -113,7 +109,7 @@ const models = {
     },
     vae_decoder: {
         name: "VAE Decoder",
-        url: `z_image_turbo_onnx/vae_decoder/model.onnx`,
+        url: `z_image_turbo_onnx/vae_decoder/model_f16.onnx`,
         size: "93MB",
         opt: {
             freeDimensionOverrides: {
@@ -713,12 +709,10 @@ async function initializeTensors() {
     // models["text_encoder"].feed = {
     //     input_ids: await createTensor(models["text_encoder"].inputInfo.input_ids),
     //     attention_mask: await createTensor(models["text_encoder"].inputInfo.attention_mask),
-    //     position_ids: await createTensor(models["text_encoder"].inputInfo.position_ids),
     // };
     models["text_encoder"].fetches = {
-        logits: await createTensor(models["text_encoder"].outputInfo.logits),
         // Delay the creation of this tensor until needed, as the sequence length may change
-        // "/model/layers.34/Add_1_output_0": await createTensor(models["text_encoder"].outputInfo["/model/layers.34/Add_1_output_0"]),
+        // "encoder_hidden_state": await createTensor(models["text_encoder"].outputInfo["encoder_hidden_state"]),
     };
 
     // transformer
@@ -850,12 +844,11 @@ async function generateImage() {
     // Since the tensors of Text Encoder dynamically allocated according to the effective sequence length,
     // we need to create the tensor here.
     models["text_encoder"].feed = {
-        // input ids / masks / positions must be int64
+        // input ids / masks must be int64
         input_ids: await createTensor({ dataType: "int64", dims: [batchSize, seqLen] }),
         attention_mask: await createTensor({ dataType: "int64", dims: [batchSize, seqLen] }),
-        position_ids: await createTensor({ dataType: "int64", dims: [batchSize, seqLen] }),
     };
-    models["text_encoder"].fetches["/model/layers.34/Add_1_output_0"] = await createTensor({
+    models["text_encoder"].fetches["encoder_hidden_state"] = await createTensor({
         dataType: dataType,
         dims: [batchSize, seqLen, 2560],
     });
@@ -867,11 +860,9 @@ async function generateImage() {
 
     const inputIdsData = promptInputs.input_ids[0].map(x => BigInt(x));
     const attentionMaskData = promptInputs.attention_mask[0].map(x => BigInt(x));
-    const positionIdsData = Array.from({ length: seqLen }, (_, i) => BigInt(i));
 
     writeTensor(models["text_encoder"].feed.input_ids, inputIdsData);
     writeTensor(models["text_encoder"].feed.attention_mask, attentionMaskData);
-    writeTensor(models["text_encoder"].feed.position_ids, positionIdsData);
 
     await runModel(models["text_encoder"]);
 
@@ -912,8 +903,7 @@ async function generateImage() {
     for (let i = 0; i < config.numInferenceSteps; i++) {
         // Inference prepare for Transformer
         writeTensor(models["transformer"].feed.hidden_states, latents);
-        models["transformer"].feed.encoder_hidden_states =
-            models["text_encoder"].fetches["/model/layers.34/Add_1_output_0"];
+        models["transformer"].feed.encoder_hidden_states = models["text_encoder"].fetches["encoder_hidden_state"];
         writeTensor(models["transformer"].feed.timestep, new Float32Array(Array(batchSize).fill(timesteps[i])));
 
         // Run Transformer
