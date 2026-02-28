@@ -52,25 +52,48 @@ const opt = {
     logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
 };
 
+const prompt = $("#user-input");
 // Always use local/relative paths for tokenizers, as they are small enough to be hosted on GitHub Pages
 const tokenizer = await AutoTokenizer.from_pretrained("tokenizer");
 
+const maxSeqLen = 512;
 const batchSize = config.images;
 const imageHeight = 512;
 const imageWidth = 512;
+
+prompt.value =
+    "Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights.";
+const messages = [{ role: "user", content: prompt.value }];
+const prompt_with_template = tokenizer.apply_chat_template(messages, {
+    tokenize: false,
+    add_generation_prompt: true,
+    enable_thinking: true,
+});
+
+// For WebNN: use fixed seqLen=512 with padding
+// For WebGPU: use actual sequence length (dynamic shape)
+const promptInputs = tokenizer([prompt_with_template], {
+    padding: config.useFixedSeqLen ? "max_length" : false,
+    max_length: maxSeqLen,
+    truncation: true,
+    return_tensor: false,
+});
+let realSeqLen = promptInputs.input_ids[0].length;
+
+realSeqLen = config.useFixedSeqLen ? maxSeqLen : realSeqLen;
 const models = {
     text_encoder: {
         name: "Text Encoder",
-        url: `z_image_turbo_onnx/text_encoder/${config.useQdq ? "qdq-" : ""}q4f16${!config.useQdq ? "-genai" : ""}/model.onnx`,
-        size: "118MB",
+        url: `z_image_turbo_onnx/text_encoder/q4f16-genai-${config.provider == "webnn" ? "webnn" : "webgpu"}/model.onnx`,
+        size: "2.06GB",
         // input: NodeArg(name='input_ids', type='tensor(int64)', shape=['batch_size', 'sequence_length'])
-        // input: NodeArg(name='attention_mask', type='tensor(int64)', shape=['batch_size', 'sequence_length'])
-        // output: NodeArg(name='logits', type='tensor(float)', shape=['batch_size', 'sequence_length', 151936])
+        // input: NodeArg(name='attention_mask', type='tensor(int64)', shape=['batch_size', 'total_sequence_length'])
         // output: NodeArg(name='encoder_hidden_state', type='tensor(float)', shape=['batch_size', 'sequence_length', 2560])
         opt: {
             freeDimensionOverrides: {
                 batch_size: batchSize,
-                sequence_length: 512,
+                sequence_length: realSeqLen,
+                total_sequence_length: realSeqLen,
             },
         },
         inputInfo: {
@@ -83,7 +106,8 @@ const models = {
     },
     transformer: {
         name: "Transformer",
-        url: `z_image_turbo_onnx/transformer/${config.useQdq ? "qdq-" : ""}q4f16/model.onnx`,
+        // url: `z_image_turbo_onnx/transformer/fp16_mha/q4f16/model.onnx`,
+        url: `z_image_turbo_onnx/transformer/final_q4f16/model.onnx`,
         size: "1.83GB",
         // input: NodeArg(name='hidden_states', type='tensor(float)', shape=['batch_size', 16, 'num_frames', 'height', 'width'])
         // input: NodeArg(name='timestep', type='tensor(float)', shape=['batch_size'])
@@ -95,7 +119,7 @@ const models = {
                 num_frames: 1,
                 height: imageHeight / 8,
                 width: imageWidth / 8,
-                seq_len: 512,
+                seq_len: realSeqLen,
             },
         },
         inputInfo: {
@@ -182,6 +206,7 @@ function getConfig() {
         images: 1,
         numInferenceSteps: 8,
         verbose: false,
+        useFixedSeqLen: false,
     };
 
     for (const key in config) {
@@ -506,71 +531,83 @@ async function loadModels(models) {
     log("[Load] ONNX Runtime EP device type: " + config.deviceType);
     updateLoadWave(0.0);
     load.disabled = true;
-    try {
-        for (const [name, model] of Object.entries(models)) {
-            const modelNameInLog = model.name;
-            let start = performance.now();
-            let modelUrl = `${config.model}/${model.url}`;
-            if (modelUrl.includes("huggingface.co")) {
-                await getHuggingFaceDomain().then(domain => {
-                    modelUrl = modelUrl.replace("huggingface.co", domain);
-                });
-            }
-            log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
-            const modelBuffer = await getModelOPFS(`zimage-${modelUrl.replace(/\//g, "_")}`, modelUrl, false);
-            const externalDataBytes = await getModelOPFS(
-                `zimage-${modelUrl.replace(/\//g, "_")}.data`,
-                modelUrl + ".data",
-                false,
-            );
-            model.opt.externalData = [
-                {
-                    data: externalDataBytes,
-                    path: `model.onnx.data`,
-                },
-            ];
-            if (config.provider === "webgpu") {
-                // WebGPU EP requires freeDimensionOverrides to be set for dynamic dimensions
-                model.opt.freeDimensionOverrides = {};
-            }
-            const sessOpt = { ...opt, ...model.opt };
-            const modelFetchTime = (performance.now() - start).toFixed(2);
+    // try {
+    for (const [name, model] of Object.entries(models)) {
+        const modelNameInLog = model.name;
+        let start = performance.now();
+        let modelUrl = `${config.model}/${model.url}`;
+        if (modelUrl.includes("huggingface.co")) {
+            await getHuggingFaceDomain().then(domain => {
+                modelUrl = modelUrl.replace("huggingface.co", domain);
+            });
+        }
+        log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
+        const modelBuffer = await getModelOPFS(`zimage-${modelUrl.replace(/\//g, "_")}`, modelUrl, true);
+        const externalDataBytes = await getModelOPFS(
+            `zimage-${modelUrl.replace(/\//g, "_")}.data`,
+            modelUrl + ".data",
+            true,
+        );
+        model.opt.externalData = [
+            {
+                data: externalDataBytes,
+                path: `model.onnx.data`,
+            },
+        ];
 
-            if (dom[name]) {
-                dom[name].fetch.innerHTML = modelFetchTime;
-            }
+        // TODO: remove this condition after WebNN supports transformer model
+        // if (model.name != "Transformer") {
+        // opt.executionProviders = [
+        //     {
+        //         name: "webnn",
+        //         deviceType: config.deviceType,
+        //     },
+        // ];
+        // }
 
-            log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
-            log(`[Session Create] Beginning ${modelNameInLog}`);
-
-            start = performance.now();
-            console.log(sessOpt);
-            models[name].sess = await ort.InferenceSession.create(modelBuffer, sessOpt);
-            const sessionCreationTime = (performance.now() - start).toFixed(2);
-
-            if (dom[name]) {
-                dom[name].create.innerHTML = sessionCreationTime;
-                progressManager.update(name, "compile", 100);
-            }
-
-            if (getMode()) {
-                log(`[Session Create] Create ${modelNameInLog} completed · ${sessionCreationTime}ms`);
-            } else {
-                log(`[Session Create] Create ${modelNameInLog} completed`);
-            }
+        if (opt.executionProviders[0].name === "webgpu") {
+            // WebGPU EP requires freeDimensionOverrides to be set for dynamic dimensions
+            model.opt.freeDimensionOverrides = {};
         }
 
-        if (config.provider === "webgpu") {
-            gpuDevice = ort.env.webgpu.device;
-        }
-        const startInitTensors = performance.now();
-        await initializeTensors();
+        const sessOpt = { ...opt, ...model.opt };
+        const modelFetchTime = (performance.now() - start).toFixed(2);
 
-        log(`[Session Create] Initialize tensors completed · ${(performance.now() - startInitTensors).toFixed(2)}ms`);
-    } catch (e) {
-        logError(`[Load] failed, ${e}`);
-        return;
+        if (dom[name]) {
+            dom[name].fetch.innerHTML = modelFetchTime;
+        }
+
+        log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
+        log(`[Session Create] Beginning ${modelNameInLog}`);
+
+        start = performance.now();
+        console.log(sessOpt);
+        models[name].sess = await ort.InferenceSession.create(modelBuffer, sessOpt);
+        const sessionCreationTime = (performance.now() - start).toFixed(2);
+
+        if (dom[name]) {
+            dom[name].create.innerHTML = sessionCreationTime;
+            progressManager.update(name, "compile", 100);
+        }
+
+        if (getMode()) {
+            log(`[Session Create] Create ${modelNameInLog} completed · ${sessionCreationTime}ms`);
+        } else {
+            log(`[Session Create] Create ${modelNameInLog} completed`);
+        }
     }
+
+    if (config.provider === "webgpu") {
+        gpuDevice = ort.env.webgpu.device;
+    }
+    const startInitTensors = performance.now();
+    await initializeTensors();
+
+    log(`[Session Create] Initialize tensors completed · ${(performance.now() - startInitTensors).toFixed(2)}ms`);
+    // } catch (e) {
+    //     logError(`[Load] failed, ${e}`);
+    //     return;
+    // }
     updateLoadWave(100.0);
     log("[Session Create] Ready to generate images");
     let imageArea = $$("#image_area>div");
@@ -824,8 +861,6 @@ async function generateImage() {
     let start = performance.now();
     const startTotal = start;
 
-    const prompt = $("#user-input");
-
     // Run Text Encoder
     const messages = [{ role: "user", content: prompt.value }];
     const prompt_with_template = tokenizer.apply_chat_template(messages, {
@@ -833,38 +868,96 @@ async function generateImage() {
         add_generation_prompt: true,
         enable_thinking: true,
     });
-    // TODO: set padding to false for WebGPU (dynamic)
+
+    // For WebNN: use fixed seqLen=512 with padding
+    // For WebGPU: use actual sequence length (dynamic shape)
     const promptInputs = tokenizer([prompt_with_template], {
-        padding: false,
-        max_length: 512, // Qwen3ForCausalLM max length
+        padding: config.useFixedSeqLen ? "max_length" : false,
+        max_length: maxSeqLen,
         truncation: true,
         return_tensor: false,
     });
-    const seqLen = promptInputs.attention_mask[0].reduce((s, v) => s + v, 0);
+    realSeqLen = promptInputs.input_ids[0].length;
+
+    console.log(`Provider: ${config.provider}, useFixedSeqLen: ${config.useFixedSeqLen}, seqLen: ${realSeqLen}`);
+
     // Since the tensors of Text Encoder dynamically allocated according to the effective sequence length,
     // we need to create the tensor here.
     models["text_encoder"].feed = {
         // input ids / masks must be int64
-        input_ids: await createTensor({ dataType: "int64", dims: [batchSize, seqLen] }),
-        attention_mask: await createTensor({ dataType: "int64", dims: [batchSize, seqLen] }),
+        input_ids: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen] }),
+        attention_mask: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen] }),
     };
     models["text_encoder"].fetches["encoder_hidden_state"] = await createTensor({
         dataType: dataType,
-        dims: [batchSize, seqLen, 2560],
+        dims: [batchSize, realSeqLen, 2560],
     });
 
-    console.log("effective sequence length (non-pad tokens):", seqLen);
     console.log("Prompt after applying chat template:", prompt_with_template);
     console.log("Tokenized input IDs:", promptInputs.input_ids);
     console.log("Tokenized attention mask:", promptInputs.attention_mask);
 
-    const inputIdsData = promptInputs.input_ids[0].map(x => BigInt(x));
-    const attentionMaskData = promptInputs.attention_mask[0].map(x => BigInt(x));
+    // Ensure we have exactly seqLen elements
+    const inputIdsRaw = promptInputs.input_ids[0];
+    const attentionMaskRaw = promptInputs.attention_mask[0];
+
+    const inputIdsData = new BigInt64Array(realSeqLen);
+    const attentionMaskData = new BigInt64Array(realSeqLen);
+
+    for (let i = 0; i < realSeqLen; i++) {
+        inputIdsData[i] = i < inputIdsRaw.length ? BigInt(inputIdsRaw[i]) : 0n;
+        attentionMaskData[i] = i < attentionMaskRaw.length ? BigInt(attentionMaskRaw[i]) : 1n; // default to 1 for valid tokens
+    }
+
+    // Count valid (non-padding) tokens
+    const validTokenCount = attentionMaskRaw.filter(x => x === 1).length;
+    console.log(`Valid tokens: ${validTokenCount}, Padding tokens: ${realSeqLen - validTokenCount}`);
 
     writeTensor(models["text_encoder"].feed.input_ids, inputIdsData);
     writeTensor(models["text_encoder"].feed.attention_mask, attentionMaskData);
 
     await runModel(models["text_encoder"]);
+
+    // For fixed seqLen with padding: extract only valid hidden states for Transformer
+    // Zero-out doesn't work because softmax(0) is still positive, causing attention dilution
+    // Instead, we create a new tensor with only valid tokens' hidden states
+    let transformerEncoderHiddenStates;
+    const hiddenSize = 2560;
+
+    if (config.useFixedSeqLen && validTokenCount < realSeqLen) {
+        console.log(`[Mask] Extracting ${validTokenCount} valid hidden states from ${realSeqLen} total`);
+
+        const encoderOutput = models["text_encoder"].fetches["encoder_hidden_state"];
+        const fullHiddenStates = new Float32Array(batchSize * realSeqLen * hiddenSize);
+        await readTensor(encoderOutput, fullHiddenStates);
+
+        // Create new tensor with only valid tokens
+        const validHiddenStates = new Float32Array(batchSize * validTokenCount * hiddenSize);
+
+        for (let b = 0; b < batchSize; b++) {
+            let validIdx = 0;
+            for (let s = 0; s < realSeqLen; s++) {
+                if (attentionMaskRaw[s] === 1) {
+                    const srcOffset = (b * realSeqLen + s) * hiddenSize;
+                    const dstOffset = (b * validTokenCount + validIdx) * hiddenSize;
+                    for (let h = 0; h < hiddenSize; h++) {
+                        validHiddenStates[dstOffset + h] = fullHiddenStates[srcOffset + h];
+                    }
+                    validIdx++;
+                }
+            }
+        }
+
+        // Create a new tensor for transformer with the valid hidden states only
+        transformerEncoderHiddenStates = await createTensor({
+            dataType: dataType,
+            dims: [batchSize, validTokenCount, hiddenSize],
+        });
+        writeTensor(transformerEncoderHiddenStates, validHiddenStates);
+    } else {
+        // No padding, use encoder output directly
+        transformerEncoderHiddenStates = models["text_encoder"].fetches["encoder_hidden_state"];
+    }
 
     const sessionRunTimeTextEncode = (performance.now() - start).toFixed(2);
 
@@ -903,7 +996,7 @@ async function generateImage() {
     for (let i = 0; i < config.numInferenceSteps; i++) {
         // Inference prepare for Transformer
         writeTensor(models["transformer"].feed.hidden_states, latents);
-        models["transformer"].feed.encoder_hidden_states = models["text_encoder"].fetches["encoder_hidden_state"];
+        models["transformer"].feed.encoder_hidden_states = transformerEncoderHiddenStates;
         writeTensor(models["transformer"].feed.timestep, new Float32Array(Array(batchSize).fill(timesteps[i])));
 
         // Run Transformer
@@ -1157,12 +1250,16 @@ const ui = async () => {
     }
     dom.runTotal = $("#runTotal");
 
-    opt.executionProviders = [config.provider];
     switch (config.provider) {
         case "webgpu":
             if (!("gpu" in navigator)) {
                 throw new Error("webgpu is NOT supported");
             }
+            opt.executionProviders = [
+                {
+                    name: "webgpu",
+                },
+            ];
             break;
         case "webnn":
             webnnStatus = await getWebnnStatus();
