@@ -416,33 +416,34 @@ h1.title span {
     font-size: 0.9rem !important;
 }
 
-.grid-4 {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    grid-template-rows: 1fr;
-    grid-column-gap: 0px;
-    grid-row-gap: 0px;
+.grid {
+    /* display: grid; */
+    display: flex;
+    justify-content: center;
     align-items: center;
-    gap: 10px;
+    width: 512px;
+    margin: 0 auto;
+    align-items: center;
+    /* gap: 10px; */
 }
 
-.grid-4 div {
+.grid div {
     justify-self: center;
 }
 
-.grid-4 .frame {
+.grid .frame {
     box-shadow: inset 0 0 1px 0 rgba(0, 0, 0, 0.2);
-    height: 100%;
-    width: 100%;
-    border-radius: 5px;
+    /* height: 512px; */
+    width: 512px;
+    /* border-radius: 5px; */
     display: grid;
     align-items: center;
     justify-items: center;
     background-color: var(--main-alpha-2);
-    min-height: 352.3px;
+    min-height: 378px;
 }
 
-.grid-4 .frame:hover {
+.grid .frame:hover {
     border: 1px solid var(--border);
     background-color: var(--bg);
 }
@@ -493,12 +494,12 @@ h1.title span {
     box-shadow: inset 0 0 1px 0 rgba(0, 0, 0, 0.2);
 }
 
-.grid-4 .frame svg {
+.grid .frame svg {
     width: 60px;
     height: 60px;
 }
 
-.grid-4 canvas {
+.grid canvas {
     max-width: 100%;
 }
 
@@ -868,7 +869,7 @@ h1.title span {
 
 /* Large devices such as laptops (1024px) */
 @media only screen and (max-width: 64em) {
-    .grid-4 {
+    .grid {
         grid-template-columns: 1fr 1fr;
         grid-template-rows: 1fr 1fr;
     }
@@ -889,7 +890,7 @@ h1.title span {
 }
 
 @media only screen and (max-width: 718px) {
-    .grid-4 {
+    .grid {
         grid-template-columns: 1fr 1fr;
         grid-template-rows: 1fr 1fr;
     }
@@ -937,7 +938,7 @@ h1.title span {
         row-gap: 10px;
     }
 
-    .grid-4 {
+    .grid {
         grid-template-columns: 1fr;
         grid-template-rows: 1fr 1fr 1fr 1fr;
     }

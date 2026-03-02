@@ -57,35 +57,19 @@ const prompt = $("#user-input");
 const tokenizer = await AutoTokenizer.from_pretrained("tokenizer");
 
 const maxSeqLen = 512;
-const batchSize = config.images;
-const imageHeight = 512;
-const imageWidth = 512;
+const batchSize = 1;
+const imageHeight = config.resolution;
+const imageWidth = config.resolution;
 
-prompt.value =
-    "Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights.";
-const messages = [{ role: "user", content: prompt.value }];
-const prompt_with_template = tokenizer.apply_chat_template(messages, {
-    tokenize: false,
-    add_generation_prompt: true,
-    enable_thinking: true,
-});
+// Hard code for WebNN test
+let realSeqLen = 101;
 
-// For WebNN: use fixed seqLen=512 with padding
-// For WebGPU: use actual sequence length (dynamic shape)
-const promptInputs = tokenizer([prompt_with_template], {
-    padding: config.useFixedSeqLen ? "max_length" : false,
-    max_length: maxSeqLen,
-    truncation: true,
-    return_tensor: false,
-});
-let realSeqLen = promptInputs.input_ids[0].length;
-
-realSeqLen = config.useFixedSeqLen ? maxSeqLen : realSeqLen;
 const models = {
     text_encoder: {
         name: "Text Encoder",
         url: `z_image_turbo_onnx/text_encoder/q4f16-genai-${config.provider == "webnn" ? "webnn" : "webgpu"}/model.onnx`,
         size: "2.06GB",
+        hasExternalData: true,
         // input: NodeArg(name='input_ids', type='tensor(int64)', shape=['batch_size', 'sequence_length'])
         // input: NodeArg(name='attention_mask', type='tensor(int64)', shape=['batch_size', 'total_sequence_length'])
         // output: NodeArg(name='encoder_hidden_state', type='tensor(float)', shape=['batch_size', 'sequence_length', 2560])
@@ -108,7 +92,8 @@ const models = {
         name: "Transformer",
         // url: `z_image_turbo_onnx/transformer/fp16_mha/q4f16/model.onnx`,
         url: `z_image_turbo_onnx/transformer/final_q4f16/model.onnx`,
-        size: "1.83GB",
+        size: "3.44GB",
+        hasExternalData: true,
         // input: NodeArg(name='hidden_states', type='tensor(float)', shape=['batch_size', 16, 'num_frames', 'height', 'width'])
         // input: NodeArg(name='timestep', type='tensor(float)', shape=['batch_size'])
         // input: NodeArg(name='encoder_hidden_states', type='tensor(float)', shape=['batch_size', 'seq_len', 2560])
@@ -123,7 +108,11 @@ const models = {
             },
         },
         inputInfo: {
-            hidden_states: { dataType: dataType, dims: [batchSize, 16, 1, imageHeight / 8, imageWidth / 8] },
+            hidden_states: {
+                dataType: dataType,
+                dims: [batchSize, 16, 1, imageHeight / 8, imageWidth / 8],
+                writable: true,
+            },
             timestep: { dataType: dataType, dims: [batchSize], writable: true },
             // encoder_hidden_states: { dataType: dataType, dims: [batchSize, 512, 2560] },
         },
@@ -131,10 +120,55 @@ const models = {
             unified_results: { dataType: dataType, dims: [16, 1, imageHeight / 8, imageWidth / 8] },
         },
     },
+    scheduler_step: {
+        name: "Scheduler Step",
+        url: "helper_models/scheduler_step.onnx",
+        size: "3KB",
+        hasExternalData: false,
+        opt: {
+            freeDimensionOverrides: {
+                batch: batchSize,
+                height: imageHeight / 8,
+                width: imageWidth / 8,
+            },
+        },
+        inputInfo: {
+            noise_pred: { dataType: "float32", dims: [16, 1, imageHeight / 8, imageWidth / 8] },
+            latents: { dataType: "float32", dims: [batchSize, 16, 1, imageHeight / 8, imageWidth / 8] },
+            step_info: { dataType: "float32", dims: [2], writable: true },
+        },
+        outputInfo: {
+            latents_out: {
+                dataType: "float32",
+                dims: [batchSize, 16, 1, imageHeight / 8, imageWidth / 8],
+                readable: true,
+            },
+        },
+    },
+    vae_pre_process: {
+        name: "VAE Pre Process",
+        url: "helper_models/vae_pre_process.onnx",
+        size: "1KB",
+        hasExternalData: false,
+        opt: {
+            freeDimensionOverrides: {
+                batch: batchSize,
+                height: imageHeight / 8,
+                width: imageWidth / 8,
+            },
+        },
+        inputInfo: {
+            latents: { dataType: "float32", dims: [batchSize, 16, 1, imageHeight / 8, imageWidth / 8] },
+        },
+        outputInfo: {
+            scaled_latents: { dataType: "float32", dims: [batchSize, 16, imageHeight / 8, imageWidth / 8] },
+        },
+    },
     vae_decoder: {
         name: "VAE Decoder",
         url: `z_image_turbo_onnx/vae_decoder/model_f16.onnx`,
         size: "93MB",
+        hasExternalData: false,
         opt: {
             freeDimensionOverrides: {
                 batch_size: batchSize,
@@ -153,6 +187,7 @@ const models = {
         name: "Safety Checker Pre-processing Model",
         url: "sc_prep_model_f16.onnx",
         size: "1KB",
+        hasExternalData: false,
         opt: {
             freeDimensionOverrides: {
                 batch: batchSize,
@@ -172,6 +207,7 @@ const models = {
         name: "Safety Checker",
         url: "safety_checker_model_f16.onnx",
         size: "580MB",
+        hasExternalData: false,
         opt: {
             freeDimensionOverrides: {
                 batch: batchSize,
@@ -188,6 +224,7 @@ const models = {
         },
     },
 };
+
 /*
  * get configuration from url
  */
@@ -203,10 +240,9 @@ function getConfig() {
         // Fix me: set useQdq to true once WebNN OV backend supports MatMulNBits well
         useQdq: false,
         useIOBinding: false,
-        images: 1,
         numInferenceSteps: 8,
         verbose: false,
-        useFixedSeqLen: false,
+        resolution: 512,
     };
 
     for (const key in config) {
@@ -401,18 +437,6 @@ function createLatents(shape, seed = 42) {
     return { data: out, shape };
 }
 
-// VAE scaling parameters (from Python pipeline)
-const vaeScalingFactor = 0.3611;
-const vaeShiftFactor = 0.1159;
-
-function applyVaeScaling(latentArray) {
-    const out = new Float32Array(latentArray.length);
-    for (let i = 0; i < latentArray.length; i++) {
-        out[i] = latentArray[i] / vaeScalingFactor + vaeShiftFactor;
-    }
-    return out;
-}
-
 function linspace(start, end, num) {
     const out = new Float32Array(num);
     if (num === 1) {
@@ -523,6 +547,29 @@ class Scheduler {
     }
 }
 
+const scheduler = new Scheduler();
+scheduler.setTimesteps(config.numInferenceSteps);
+
+// read scheduler-generated timesteps (do not overwrite it)
+const schedulerTimesteps = scheduler.timesteps_;
+if (config.numInferenceSteps !== schedulerTimesteps.length) {
+    throw new Error("Invalid timesteps.");
+}
+
+// compute (1000.0 - schedulerTimesteps) / 1000.0
+const timesteps = new Float32Array(schedulerTimesteps.length);
+for (let i = 0; i < schedulerTimesteps.length; i++) {
+    timesteps[i] = (1000.0 - schedulerTimesteps[i]) / 1000.0;
+}
+
+// set last element to 1.0
+timesteps[timesteps.length - 1] = 1.0;
+console.log(`num_inference_steps: ${config.numInferenceSteps}`);
+for (let i = 0; i < config.numInferenceSteps; i++) {
+    const timestep = timesteps[i];
+    console.log(`timestep ${i}, ${timestep.toFixed(2)}`);
+}
+
 /*
  * load models used in the pipeline
  */
@@ -543,28 +590,19 @@ async function loadModels(models) {
         }
         log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
         const modelBuffer = await getModelOPFS(`zimage-${modelUrl.replace(/\//g, "_")}`, modelUrl, true);
-        const externalDataBytes = await getModelOPFS(
-            `zimage-${modelUrl.replace(/\//g, "_")}.data`,
-            modelUrl + ".data",
-            true,
-        );
-        model.opt.externalData = [
-            {
-                data: externalDataBytes,
-                path: `model.onnx.data`,
-            },
-        ];
-
-        // TODO: remove this condition after WebNN supports transformer model
-        // if (model.name != "Transformer") {
-        // opt.executionProviders = [
-        //     {
-        //         name: "webnn",
-        //         deviceType: config.deviceType,
-        //     },
-        // ];
-        // }
-
+        if (model.hasExternalData) {
+            const externalDataBytes = await getModelOPFS(
+                `zimage-${modelUrl.replace(/\//g, "_")}.data`,
+                modelUrl + ".data",
+                true,
+            );
+            model.opt.externalData = [
+                {
+                    data: externalDataBytes,
+                    path: `model.onnx.data`,
+                },
+            ];
+        }
         if (opt.executionProviders[0].name === "webgpu") {
             // WebGPU EP requires freeDimensionOverrides to be set for dynamic dimensions
             model.opt.freeDimensionOverrides = {};
@@ -604,12 +642,13 @@ async function loadModels(models) {
     await initializeTensors();
 
     log(`[Session Create] Initialize tensors completed · ${(performance.now() - startInitTensors).toFixed(2)}ms`);
+
     // } catch (e) {
     //     logError(`[Load] failed, ${e}`);
     //     return;
     // }
     updateLoadWave(100.0);
-    log("[Session Create] Ready to generate images");
+    log("[Session Create] Ready to generate image");
     let imageArea = $$("#image_area>div");
     imageArea.forEach(i => {
         i.setAttribute("class", "frame ready");
@@ -743,12 +782,12 @@ function disposeTensors() {
 
 async function initializeTensors() {
     // text_encoder
-    // models["text_encoder"].feed = {
-    //     input_ids: await createTensor(models["text_encoder"].inputInfo.input_ids),
-    //     attention_mask: await createTensor(models["text_encoder"].inputInfo.attention_mask),
-    // };
+    // Delay the creation of this tensor until needed, as the sequence length may change
+    models["text_encoder"].feed = {
+        //     input_ids: await createTensor(models["text_encoder"].inputInfo.input_ids),
+        //     attention_mask: await createTensor(models["text_encoder"].inputInfo.attention_mask),
+    };
     models["text_encoder"].fetches = {
-        // Delay the creation of this tensor until needed, as the sequence length may change
         // "encoder_hidden_state": await createTensor(models["text_encoder"].outputInfo["encoder_hidden_state"]),
     };
 
@@ -764,9 +803,28 @@ async function initializeTensors() {
         unified_results: await createTensor(models["transformer"].outputInfo.unified_results),
     };
 
+    // scheduler_step
+    models["scheduler_step"].feed = {
+        noise_pred: models["transformer"].fetches.unified_results,
+        // latents: await createTensor(models["scheduler_step"].inputInfo.latents),
+        latents: models["transformer"].feed.hidden_states, // directly use the hidden_states tensor as latents to save memory and avoid copy
+        step_info: await createTensor(models["scheduler_step"].inputInfo.step_info),
+    };
+    models["scheduler_step"].fetches = {
+        latents_out: await createTensor(models["scheduler_step"].outputInfo.latents_out),
+    };
+
+    // vae_pre_process
+    models["vae_pre_process"].feed = {
+        latents: models["scheduler_step"].fetches.latents_out,
+    };
+    models["vae_pre_process"].fetches = {
+        scaled_latents: await createTensor(models["vae_pre_process"].outputInfo.scaled_latents),
+    };
+
     // vae_decoder
     models["vae_decoder"].feed = {
-        latent_sample: await createTensor(models["vae_decoder"].inputInfo.latent_sample),
+        latent_sample: models["vae_pre_process"].fetches.scaled_latents,
     };
     models["vae_decoder"].fetches = {
         sample: await createTensor(models["vae_decoder"].outputInfo.sample),
@@ -806,13 +864,12 @@ async function runModel(model) {
 }
 
 /**
- * draw images from pixel data
+ * draw image from pixel data
  * @param {Float16Array} pix
- * @param {number} imageIndex
  * @param {number} height
  * @param {number} width
  */
-function drawImage(pix, imageIndex, height, width) {
+function drawImage(pix, height, width) {
     const channelSize = height * width;
     const rgbaData = new Uint8ClampedArray(channelSize * 4);
 
@@ -830,7 +887,7 @@ function drawImage(pix, imageIndex, height, width) {
     }
 
     const imageData = new ImageData(rgbaData, width, height);
-    const canvas = $(`#img_canvas_${imageIndex}`);
+    const canvas = $(`#img_canvas`);
     if (canvas) {
         canvas.width = width;
         canvas.height = height;
@@ -853,9 +910,8 @@ async function generateImage() {
     log(`[Session Run] Beginning`);
 
     await loading;
-    for (let i = 0; i < batchSize; i++) {
-        $(`#img_div_${i}`).setAttribute("class", "frame inferncing");
-    }
+
+    $("#img_div").setAttribute("class", "frame inferncing");
 
     // Inference prepare for Text Encoders
     let start = performance.now();
@@ -869,29 +925,29 @@ async function generateImage() {
         enable_thinking: true,
     });
 
-    // For WebNN: use fixed seqLen=512 with padding
-    // For WebGPU: use actual sequence length (dynamic shape)
     const promptInputs = tokenizer([prompt_with_template], {
-        padding: config.useFixedSeqLen ? "max_length" : false,
+        padding: false,
         max_length: maxSeqLen,
         truncation: true,
         return_tensor: false,
     });
     realSeqLen = promptInputs.input_ids[0].length;
 
-    console.log(`Provider: ${config.provider}, useFixedSeqLen: ${config.useFixedSeqLen}, seqLen: ${realSeqLen}`);
+    console.log(`Provider: ${config.provider}, seqLen: ${realSeqLen}`);
 
     // Since the tensors of Text Encoder dynamically allocated according to the effective sequence length,
     // we need to create the tensor here.
     models["text_encoder"].feed = {
         // input ids / masks must be int64
-        input_ids: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen] }),
-        attention_mask: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen] }),
+        input_ids: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen], writable: true }),
+        attention_mask: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen], writable: true }),
     };
-    models["text_encoder"].fetches["encoder_hidden_state"] = await createTensor({
-        dataType: dataType,
-        dims: [batchSize, realSeqLen, 2560],
-    });
+    models["text_encoder"].fetches = {
+        encoder_hidden_state: await createTensor({
+            dataType: dataType,
+            dims: [batchSize, realSeqLen, 2560],
+        }),
+    };
 
     console.log("Prompt after applying chat template:", prompt_with_template);
     console.log("Tokenized input IDs:", promptInputs.input_ids);
@@ -909,55 +965,10 @@ async function generateImage() {
         attentionMaskData[i] = i < attentionMaskRaw.length ? BigInt(attentionMaskRaw[i]) : 1n; // default to 1 for valid tokens
     }
 
-    // Count valid (non-padding) tokens
-    const validTokenCount = attentionMaskRaw.filter(x => x === 1).length;
-    console.log(`Valid tokens: ${validTokenCount}, Padding tokens: ${realSeqLen - validTokenCount}`);
-
     writeTensor(models["text_encoder"].feed.input_ids, inputIdsData);
     writeTensor(models["text_encoder"].feed.attention_mask, attentionMaskData);
 
     await runModel(models["text_encoder"]);
-
-    // For fixed seqLen with padding: extract only valid hidden states for Transformer
-    // Zero-out doesn't work because softmax(0) is still positive, causing attention dilution
-    // Instead, we create a new tensor with only valid tokens' hidden states
-    let transformerEncoderHiddenStates;
-    const hiddenSize = 2560;
-
-    if (config.useFixedSeqLen && validTokenCount < realSeqLen) {
-        console.log(`[Mask] Extracting ${validTokenCount} valid hidden states from ${realSeqLen} total`);
-
-        const encoderOutput = models["text_encoder"].fetches["encoder_hidden_state"];
-        const fullHiddenStates = new Float32Array(batchSize * realSeqLen * hiddenSize);
-        await readTensor(encoderOutput, fullHiddenStates);
-
-        // Create new tensor with only valid tokens
-        const validHiddenStates = new Float32Array(batchSize * validTokenCount * hiddenSize);
-
-        for (let b = 0; b < batchSize; b++) {
-            let validIdx = 0;
-            for (let s = 0; s < realSeqLen; s++) {
-                if (attentionMaskRaw[s] === 1) {
-                    const srcOffset = (b * realSeqLen + s) * hiddenSize;
-                    const dstOffset = (b * validTokenCount + validIdx) * hiddenSize;
-                    for (let h = 0; h < hiddenSize; h++) {
-                        validHiddenStates[dstOffset + h] = fullHiddenStates[srcOffset + h];
-                    }
-                    validIdx++;
-                }
-            }
-        }
-
-        // Create a new tensor for transformer with the valid hidden states only
-        transformerEncoderHiddenStates = await createTensor({
-            dataType: dataType,
-            dims: [batchSize, validTokenCount, hiddenSize],
-        });
-        writeTensor(transformerEncoderHiddenStates, validHiddenStates);
-    } else {
-        // No padding, use encoder output directly
-        transformerEncoderHiddenStates = models["text_encoder"].fetches["encoder_hidden_state"];
-    }
 
     const sessionRunTimeTextEncode = (performance.now() - start).toFixed(2);
 
@@ -967,40 +978,19 @@ async function generateImage() {
         log(`[Session Run] Text Encoder completed`);
     }
 
-    const scheduler = new Scheduler();
-    scheduler.setTimesteps(config.numInferenceSteps);
+    // Use JS to generate latents (faster for simple random generation)
+    const seedValue = parseFloat($("#seed-input").value) || 42;
+    log(`Creating latents with seed=${seedValue}`);
+    let latents = createLatents(models["transformer"].inputInfo.hidden_states.dims, seedValue).data;
 
-    // read scheduler-generated timesteps (do not overwrite it)
-    const schedulerTimesteps = scheduler.timesteps_;
-    if (config.numInferenceSteps !== schedulerTimesteps.length) {
-        throw new Error("Invalid timesteps.");
-    }
-
-    // compute (1000.0 - schedulerTimesteps) / 1000.0
-    const timesteps = new Float32Array(schedulerTimesteps.length);
-    for (let i = 0; i < schedulerTimesteps.length; i++) {
-        timesteps[i] = (1000.0 - schedulerTimesteps[i]) / 1000.0;
-    }
-
-    // set last element to 1.0
-    timesteps[timesteps.length - 1] = 1.0;
-    console.log(`num_inference_steps: ${config.numInferenceSteps}`);
     for (let i = 0; i < config.numInferenceSteps; i++) {
-        const timestep = timesteps[i];
-        console.log(`timestep ${i}, ${timestep.toFixed(2)}`);
-    }
-    const latentShape = [batchSize, 16, 1, imageHeight / 8, imageWidth / 8];
-    // createLatents returns { data, shape } — keep a Float32Array in `latents`
-    const latentsObj = createLatents(latentShape);
-    let latents = latentsObj.data;
-    for (let i = 0; i < config.numInferenceSteps; i++) {
+        start = performance.now();
         // Inference prepare for Transformer
         writeTensor(models["transformer"].feed.hidden_states, latents);
-        models["transformer"].feed.encoder_hidden_states = transformerEncoderHiddenStates;
-        writeTensor(models["transformer"].feed.timestep, new Float32Array(Array(batchSize).fill(timesteps[i])));
+        models["transformer"].feed.encoder_hidden_states = models["text_encoder"].fetches["encoder_hidden_state"];
+        writeTensor(models["transformer"].feed.timestep, new Float32Array([timesteps[i]]));
 
         // Run Transformer
-        start = performance.now();
         await runModel(models["transformer"]);
         const transformerRunTime = (performance.now() - start).toFixed(2);
 
@@ -1010,36 +1000,38 @@ async function generateImage() {
             log(`[Session Run] Transformer completed`);
         }
 
-        const noise_pred = models["transformer"].fetches.unified_results;
+        // Use ONNX helper model for the scheduler Euler step
+        start = performance.now();
+        writeTensor(models["scheduler_step"].feed.step_info, new Float32Array([i, config.numInferenceSteps]));
 
-        latents = scheduler.step(noise_pred.data, 1000, latents);
+        await runModel(models["scheduler_step"]);
+        await readTensor(models["scheduler_step"].fetches.latents_out, latents);
+        const schedulerRunTime = (performance.now() - start).toFixed(2);
+        if (getMode()) {
+            log(`[Session Run] Scheduler step execution time ${i}: ${schedulerRunTime}ms`);
+        } else {
+            log(`[Session Run] Scheduler step completed`);
+        }
     }
 
     // Inference prepare for VAE Decoder
 
-    // Prepare latent sample for VAE decoder by squeezing frame dim (axis=2)
-    // 'latents' is a Float32Array with shape [batch, 16, 1, H, W]
-    // We need [batch, 16, H, W]
-    const H = imageHeight / 8;
-    const W = imageWidth / 8;
-    const C = 16;
-    const batch = batchSize;
-    const vaeLen = batch * C * H * W;
-    const squeezedLatents = new Float32Array(vaeLen);
-    // Since num_frames == 1, the memory layout aligns so we can copy directly
-    for (let i = 0; i < vaeLen; i++) {
-        squeezedLatents[i] = latents[i];
+    // Use ONNX helper model for squeeze + VAE scaling
+    start = performance.now();
+    await runModel(models["vae_pre_process"]);
+    const vaePreProcessTime = (performance.now() - start).toFixed(2);
+    if (getMode()) {
+        log(`[Session Run] VAE pre-processing execution time: ${vaePreProcessTime}ms`);
+    } else {
+        log(`[Session Run] VAE pre-processing completed`);
     }
-
-    const scaledLatents = applyVaeScaling(squeezedLatents);
-    writeTensor(models["vae_decoder"].feed.latent_sample, scaledLatents);
 
     // Run VAE Decoder
     start = performance.now();
     await runModel(models["vae_decoder"]);
 
     const pixSize = sizeOfShape(models["vae_decoder"].outputInfo.sample.dims);
-    let pix = new Float32Array(pixSize);
+    const pix = new Float32Array(pixSize);
     await readTensor(models["vae_decoder"].fetches.sample, pix);
 
     let vaeRunTime = (performance.now() - start).toFixed(2);
@@ -1051,18 +1043,13 @@ async function generateImage() {
     }
 
     start = performance.now();
-    for (let i = 0; i < batchSize; i++) {
-        const size = 3 * imageHeight * imageWidth;
-        const offset = i * size;
-        const subPix = pix.subarray(offset, offset + size);
-        drawImage(subPix, i, imageHeight, imageWidth);
-    }
+    drawImage(pix, imageHeight, imageWidth);
     const imageDrawTime = (performance.now() - start).toFixed(2);
-    log(`[Images Drawing] drawing ${batchSize} images time: ${imageDrawTime}ms`);
+    log(`[Image Drawing] drawing image time: ${imageDrawTime}ms`);
 
     const totalRunTime = (performance.now() - startTotal).toFixed(2);
     if (getMode()) {
-        log(`[Total] Total images generation time: ${totalRunTime}ms`);
+        log(`[Total] Total image generation time: ${totalRunTime}ms`);
     }
     dom.runTotal.innerHTML = totalRunTime;
 
@@ -1088,16 +1075,14 @@ async function generateImage() {
         const totalScRunTime = (performance.now() - start).toFixed(2);
 
         // 4. Process Results UI
-        for (let i = 0; i < batchSize; i++) {
-            let nsfw = nsfwBuffer[i] ? true : false;
-            log(`[Session Run][Image ${i + 1}] Safety Checker - not safe for work (NSFW) concepts: ${nsfw}`);
+        let nsfw = nsfwBuffer[0] ? true : false;
+        log(`[Session Run][Image ${i + 1}] Safety Checker - not safe for work (NSFW) concepts: ${nsfw}`);
 
-            if (nsfw) {
-                $(`#img_div_${i}`).setAttribute("class", "frame done nsfw");
-                $(`#img_div_${i}`).setAttribute("title", "Not safe for work (NSFW) content");
-            } else {
-                $(`#img_div_${i}`).setAttribute("class", "frame done");
-            }
+        if (nsfw) {
+            $("#img_div").setAttribute("class", "frame done nsfw");
+            $("#img_div").setAttribute("title", "Not safe for work (NSFW) content");
+        } else {
+            $("#img_div").setAttribute("class", "frame done");
         }
 
         dom["safety_checker"].run.innerHTML = totalScRunTime;
@@ -1105,15 +1090,13 @@ async function generateImage() {
             log(`[Session Run] Safety Checker execution time (Batch ${batchSize}): ${totalScRunTime}ms`);
         }
     } else {
-        for (let i = 0; i < batchSize; i++) {
-            $(`#img_div_${i}`).setAttribute("class", "frame done");
-        }
+        $("#img_div").setAttribute("class", "frame done");
     }
 
     $("#total_data").innerHTML = `${totalRunTime}ms`;
 
     generate.disabled = false;
-    log("[Info] Images generation completed");
+    log("[Info] Image generation completed");
     // } catch (e) {
     //     logError("[Error] " + e);
     //     return;
@@ -1216,7 +1199,6 @@ const ui = async () => {
     load = $("#load");
     generate = $("#generate");
     buttons = $("#buttons");
-    $("#imagesTd").innerHTML = `Images x ${batchSize}`;
 
     memoryReleaseSwitch.addEventListener("change", () => {
         if (memoryReleaseSwitch.checked) {
@@ -1311,14 +1293,27 @@ const ui = async () => {
         generateImage();
     });
 
+    // Seed randomize button
+    const randomSeedBtn = $("#random-seed");
+    if (randomSeedBtn) {
+        randomSeedBtn.addEventListener("click", () => {
+            $("#seed-input").value = Math.floor(Math.random() * 2147483647);
+        });
+    }
+
+    // Allow seed from URL query param
+    const seedFromUrl = getQueryValue("seed");
+    if (seedFromUrl !== null) {
+        $("#seed-input").value = seedFromUrl;
+    }
+
     const loadModelUi = () => {
         if (!config.safetyChecker) {
             delete models["safety_checker"];
             delete models["sc_prep"];
         }
         loading = loadModels(models);
-        const imgDivs = $$("#image_area > div");
-        imgDivs.forEach(div => div.setAttribute("class", "frame loadwave"));
+        $("#img_div").setAttribute("class", "frame loadwave");
         buttons.setAttribute("class", "button-group key loading");
     };
 
@@ -1341,6 +1336,8 @@ const ui = async () => {
             const sessions = [
                 models["text_encoder"]?.sess,
                 models["transformer"]?.sess,
+                models["scheduler_step"]?.sess,
+                models["vae_pre_process"]?.sess,
                 models["vae_decoder"]?.sess,
                 models["sc_prep"]?.sess,
                 models["safety_checker"]?.sess,
@@ -1355,8 +1352,7 @@ const ui = async () => {
             generate.disabled = true;
             $("#user-input").setAttribute("class", "form-control");
             updateLoadWave(0.0);
-            const imgDivs = [img_div_0, img_div_1, img_div_2, img_div_3];
-            imgDivs.forEach(div => div.setAttribute("class", "frame"));
+            $("#img_div").setAttribute("class", "frame");
             progressManager.reset();
             for (const key in dom) {
                 if (key === "runTotal") {
