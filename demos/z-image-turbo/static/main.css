@@ -248,7 +248,8 @@ h1.title span {
 .key button {
     border-radius: 50px;
     font-size: 1rem;
-    min-width: 190px;
+    /* padding: 0 20px; */
+    white-space: nowrap;
     /* background: var(--bg);
     color: var(--main-dark);
 	border: 3px solid var(--main); */
@@ -710,6 +711,10 @@ h1.title span {
     display: none;
 }
 
+#buttons #generate {
+    padding: 8px 12px; /* Decrease padding further to match Load Models width */
+}
+
 #buttons.loaded #generate {
     display: block;
 }
@@ -735,12 +740,12 @@ h1.title span {
 }
 
 .v1 {
-    padding: 1rem 40px;
+    padding: 1rem 20px;
     border-bottom: 1px solid var(--border);
 }
 
 .v9 {
-    padding: 0 40px;
+    padding: 0 20px 0 20px;
 }
 
 #webnnstatus {
@@ -882,8 +887,8 @@ h1.title span {
     height: calc(100vh - 140px);
     overflow: hidden;
     gap: 30px;
-    margin-top: 20px;
-    padding-bottom: 20px;
+    margin-top: 15px;
+    padding-bottom: 0;
 }
 
 .dev-panel {
@@ -893,18 +898,17 @@ h1.title span {
 }
 
 .layout-left {
-    flex: 1;
+    flex: 6;
     min-width: 450px;
-    max-width: 55%;
     display: flex;
     flex-direction: column;
     overflow-y: auto;
-    padding-right: 15px;
+    overflow-x: hidden;
     order: 1; /* Force to the left since it's second in DOM */
 }
 
 .layout-right {
-    flex: 1;
+    flex: 4;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -912,7 +916,7 @@ h1.title span {
     background: var(--main-alpha-2);
     border: 1px solid var(--border);
     border-radius: 12px;
-    padding: 20px;
+    padding: 10px;
     order: 2; /* Force to the right */
     height: 100%;
     box-sizing: border-box;
@@ -952,6 +956,12 @@ h1.title span {
 }
 
 @media (max-width: 1024px) {
+    .controls-panel .settings-left {
+        flex-wrap: wrap;
+    }
+    .controls-panel .settings-row {
+        flex-wrap: wrap;
+    }
     .layout-container {
         flex-direction: column;
         height: auto;
@@ -993,11 +1003,22 @@ h1.title span {
 .controls-panel .input-row {
     display: flex;
     width: 100%;
+    position: relative;
+}
+
+.controls-panel .tokeninfo {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    font-size: 0.8rem;
+    color: var(--font-weak);
+    pointer-events: none;
+    background: transparent;
 }
 
 .controls-panel #user-input {
     flex: 1;
-    padding: 8px 12px;
+    padding: 6px 12px 28px 12px;
     border-radius: 8px;
     border: 1px solid var(--border);
     background: var(--bg);
@@ -1010,16 +1031,16 @@ h1.title span {
 
 .controls-panel .settings-row {
     display: flex;
-    flex-wrap: wrap;
-    gap: 20px;
+    /* flex-wrap: nowrap; */
+    gap: 12px;
     align-items: center;
     justify-content: space-between;
 }
 
 .controls-panel .settings-left {
     display: flex;
-    flex-wrap: wrap;
-    gap: 24px;
+    /* flex-wrap: nowrap; */
+    gap: 8px;
     align-items: center;
 }
 
@@ -1039,7 +1060,8 @@ h1.title span {
 }
 
 .controls-panel #resolution-select {
-    padding: 6px 12px;
+    padding: 2px 6px;
+    width: 105px;
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg);
@@ -1059,16 +1081,29 @@ h1.title span {
 }
 
 .controls-panel #seed-input {
-    width: 120px;
-    padding: 6px 8px;
+    width: 105px;
+    padding: 4px 6px;
     border: none;
     font-size: 14px;
     background: transparent;
     color: var(--font);
-    font-family: "Archivo", sans-serif;
+    font-family: inherit;
+    text-align: center;
 }
 
-.controls-panel #seed-input:focus {
+.controls-panel #steps-input {
+    width: 50px;
+    padding: 4px 6px;
+    border: none;
+    font-size: 14px;
+    background: transparent;
+    color: var(--font);
+    font-family: inherit;
+    text-align: center;
+}
+
+.controls-panel #seed-input:focus,
+.controls-panel #steps-input:focus {
     outline: none;
 }
 
@@ -1089,7 +1124,7 @@ h1.title span {
     padding: 0 !important;
     border: none !important;
     background: transparent !important;
-    max-width: auto !important;
+    max-width: 100% !important;
     border-radius: 0 !important;
 }
 
@@ -1153,7 +1188,7 @@ h1.title span {
     }
 
     .v9 {
-        padding: 1rem;
+        padding: 1rem 1rem 0 1rem;
     }
 
     .footerinfo {
@@ -1199,7 +1234,7 @@ h1.title span {
     }
 
     .v9 {
-        padding: 1rem;
+        padding: 1rem 1rem 0 1rem;
     }
 
     .mt-1 {

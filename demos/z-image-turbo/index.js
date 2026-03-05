@@ -5,13 +5,6 @@
 // An example how to run Z-Image Turbo with webnn/webgpu in onnxruntime-web.
 //
 
-import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@xenova/transformers/dist/transformers.js";
-
-env.localModelPath = "models/";
-env.allowRemoteModels = true;
-env.allowLocalModels = true;
-env.useBrowserCache = false;
-
 import {
     $,
     $$,
@@ -25,11 +18,11 @@ import {
     readBackMLTensor,
     readBackGpuTensor,
 } from "../../assets/js/common_utils.js";
+import { getPromptInputs, drawImage, getConfig, getModelOPFS, getMode, sizeOfShape, createLatents } from "./utils.js";
+import { updateScheduler } from "./scheduler.js";
 
-let device = "gpu";
 let mlContext;
 let gpuDevice;
-let badge;
 let memoryReleaseSwitch;
 const dom = {};
 const modelDOMPrefixes = {
@@ -38,32 +31,26 @@ const modelDOMPrefixes = {
     vae_decoder: "vae",
     safety_checker: "sc",
 };
-let generate = null;
-let load = null;
-let buttons = null;
-let loadwave = null;
-let loadwaveData = null;
+const buttons = $("#buttons");
+const generate = $("#generate");
+const load = $("#load");
+const prompt = $("#user-input");
 let loading;
-let webnnStatus;
-let currentResolution = null;
 
 const config = getConfig();
+let numInferenceSteps = 9;
+let timesteps = null;
 const dataType = "float32";
-const opt = {
-    logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
-};
 
-const prompt = $("#user-input");
-// Always use local/relative paths for tokenizers, as they are small enough to be hosted on GitHub Pages
-const tokenizer = await AutoTokenizer.from_pretrained("tokenizer");
-
-const maxSeqLen = 512;
+const maxSequenceLength = 512;
 const batchSize = 1;
-let imageHeight = config.resolution;
-let imageWidth = config.resolution;
+let resolution = 512;
+let currentResolution = resolution;
+let imageHeight = resolution;
+let imageWidth = resolution;
 
 // Hard code for WebNN test
-let realSeqLen = 72;
+let sequenceLength = 67;
 
 const models = {
     text_encoder: {
@@ -91,7 +78,7 @@ const models = {
     vae_decoder: {
         name: "VAE Decoder",
         url: "vae_decoder_model_f16.onnx",
-        size: "93MB",
+        size: "94.6MB",
     },
     sc_prep: {
         name: "Safety Checker Pre-processing",
@@ -113,8 +100,8 @@ function updateModelDimensions(res) {
         models["text_encoder"].opt = {
             freeDimensionOverrides: {
                 batch_size: batchSize,
-                sequence_length: realSeqLen,
-                total_sequence_length: realSeqLen,
+                sequence_length: sequenceLength,
+                total_sequence_length: sequenceLength,
             },
         };
         models["transformer"].opt = {
@@ -123,7 +110,7 @@ function updateModelDimensions(res) {
                 num_frames: 1,
                 height: imageHeight / 8,
                 width: imageWidth / 8,
-                seq_len: realSeqLen,
+                seq_len: sequenceLength,
             },
         };
         models["scheduler_step"].opt = {
@@ -224,51 +211,6 @@ function updateModelDimensions(res) {
     }
 }
 
-/*
- * get configuration from url
- */
-function getConfig() {
-    const queryParams = new URLSearchParams(window.location.search);
-    const config = {
-        model: location.href.includes("github.io")
-            ? "https://huggingface.co/lwanming/Z-Image-Turbo/resolve/main"
-            : "models",
-        mode: "none",
-        safetyChecker: true,
-        provider: "webgpu",
-        deviceType: "gpu",
-        useIOBinding: true,
-        numInferenceSteps: null,
-        verbose: false,
-        resolution: 512,
-    };
-
-    for (const key in config) {
-        const lowerKey = key.toLowerCase();
-        const value = queryParams.get(key) ?? queryParams.get(lowerKey);
-        if (value !== null) {
-            if (typeof config[key] === "boolean") {
-                config[key] = value === "true";
-            } else if (typeof config[key] === "number" || key === "numInferenceSteps") {
-                config[key] = isNaN(parseInt(value)) ? config[key] : parseInt(value);
-            } else {
-                config[key] = decodeURIComponent(value);
-            }
-        }
-    }
-
-    if (config.numInferenceSteps === null) {
-        config.numInferenceSteps = config.resolution === 1024 ? 3 : 9;
-    }
-
-    return config;
-}
-
-const getQueryValue = name => {
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get(name);
-};
-
 class ProgressManager {
     constructor(config) {
         this.config = config;
@@ -340,222 +282,6 @@ class ProgressManager {
     }
 }
 const progressManager = new ProgressManager(config);
-
-// Get model via Origin Private File System
-async function getModelOPFS(name, url, updateModel, onProgress) {
-    const root = await navigator.storage.getDirectory();
-    let fileHandle;
-
-    async function updateFile() {
-        const response = await fetch(url);
-        const buffer = await readResponse(response, onProgress);
-        fileHandle = await root.getFileHandle(name, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(buffer);
-        await writable.close();
-        return buffer;
-    }
-
-    if (updateModel) {
-        return await updateFile();
-    }
-
-    try {
-        fileHandle = await root.getFileHandle(name);
-        const blob = await fileHandle.getFile();
-        let buffer = await blob.arrayBuffer();
-        if (buffer) {
-            if (onProgress) onProgress(100);
-            return buffer;
-        }
-    } catch (e) {
-        console.log(e.message);
-        return await updateFile();
-    }
-}
-
-async function readResponse(response, onProgress) {
-    const contentLength = response.headers.get("Content-Length");
-    let total = parseInt(contentLength ?? "0");
-    let buffer = new Uint8Array(total);
-    let loadedByteCount = 0;
-
-    const reader = response.body.getReader();
-    async function read() {
-        const { done, value } = await reader.read();
-        if (done) return;
-
-        let newLoadedByteCount = loadedByteCount + value.length;
-        let fetchProgress = total > 0 ? (newLoadedByteCount / total) * 100 : 100;
-
-        if (onProgress) onProgress(fetchProgress);
-
-        if (newLoadedByteCount > total) {
-            total = newLoadedByteCount;
-            let newBuffer = new Uint8Array(total);
-            newBuffer.set(buffer);
-            buffer = newBuffer;
-        }
-        buffer.set(value, loadedByteCount);
-        loadedByteCount = newLoadedByteCount;
-        return read();
-    }
-
-    await read();
-    return buffer;
-}
-
-const getMode = () => {
-    return getQueryValue("mode") === "normal" ? false : true;
-};
-
-const sizeOfShape = shape => shape.reduce((a, b) => a * b, 1);
-
-// Seeded PRNG (mulberry32)
-function mulberry32(seed) {
-    let t = seed >>> 0;
-    return function () {
-        t += 0x6d2b79f5;
-        let r = Math.imul(t ^ (t >>> 15), t | 1);
-        r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
-        return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
-    };
-}
-
-// Create latents with normal(0,1) samples, returns { data: Float32Array, shape: number[] }
-function createLatents(shape, seed = 42) {
-    const size = shape.reduce((a, b) => a * b, 1);
-    const rand = mulberry32(seed);
-    const out = new Float32Array(size);
-
-    // Box-Muller transform (generate pairs)
-    for (let i = 0; i < size; i += 2) {
-        let u = rand();
-        let v = rand();
-        // avoid log(0)
-        if (u === 0) u = Number.EPSILON;
-        const mag = Math.sqrt(-2.0 * Math.log(u));
-        const z0 = mag * Math.cos(2.0 * Math.PI * v);
-        const z1 = mag * Math.sin(2.0 * Math.PI * v);
-        out[i] = z0;
-        if (i + 1 < size) out[i + 1] = z1;
-    }
-    return { data: out, shape };
-}
-
-function linspace(start, end, num) {
-    const out = new Float32Array(num);
-    if (num === 1) {
-        out[0] = start;
-        return out;
-    }
-    const step = (end - start) / (num - 1);
-    for (let i = 0; i < num; i++) out[i] = start + step * i;
-    return out;
-}
-
-function reverseFloat32(arr) {
-    const out = new Float32Array(arr.length);
-    for (let i = 0; i < arr.length; i++) out[i] = arr[arr.length - 1 - i];
-    return out;
-}
-
-function appendFloat32(arr, val) {
-    const out = new Float32Array(arr.length + 1);
-    out.set(arr, 0);
-    out[arr.length] = val;
-    return out;
-}
-
-// Scheduler class
-class Scheduler {
-    constructor() {
-        // config
-        this.num_train_timesteps_ = 1000;
-        this.shift_ = 3.0;
-        this.num_inference_steps_ = null;
-        this.step_index_ = null;
-
-        // sigmas: np.linspace(1, self.num_train_timesteps_, self.num_train_timesteps_)[::-1]
-        const timestepsInit = linspace(1, this.num_train_timesteps_, this.num_train_timesteps_);
-        const timestepsRev = reverseFloat32(timestepsInit);
-
-        // sigmas = timesteps / self.num_train_timesteps_
-        const sigmasTmp = new Float32Array(timestepsRev.length);
-        for (let i = 0; i < timestepsRev.length; i++) {
-            sigmasTmp[i] = timestepsRev[i] / this.num_train_timesteps_;
-        }
-
-        // self.sigmas_ = self.shift_ * sigmas / (1 + (self.shift_ - 1) * sigmas)
-        this.sigmas_ = new Float32Array(sigmasTmp.length);
-        for (let i = 0; i < sigmasTmp.length; i++) {
-            const s = sigmasTmp[i];
-            this.sigmas_[i] = (this.shift_ * s) / (1 + (this.shift_ - 1) * s);
-        }
-
-        this.sigma_min_ = this.sigmas_[this.sigmas_.length - 1];
-        this.sigma_max_ = this.sigmas_[0];
-    }
-
-    _sigmaToT(sigma) {
-        return sigma * this.num_train_timesteps_;
-    }
-
-    setTimesteps(numInferenceSteps) {
-        // timesteps = np.linspace(self._sigma_to_t(self.sigma_max_), self._sigma_to_t(self.sigma_min_), num_inference_steps)
-        const tStart = this._sigmaToT(this.sigma_max_);
-        const tEnd = this._sigmaToT(this.sigma_min_);
-        const timesteps = linspace(tStart, tEnd, numInferenceSteps);
-
-        // sigmas = timesteps / self.num_train_timesteps_
-        const sigmas = new Float32Array(timesteps.length);
-        for (let i = 0; i < timesteps.length; i++) {
-            sigmas[i] = timesteps[i] / this.num_train_timesteps_;
-        }
-
-        // sigmas = self.shift_ * sigmas / (1 + (self.shift_ - 1) * sigmas)
-        for (let i = 0; i < sigmas.length; i++) {
-            const s = sigmas[i];
-            sigmas[i] = (this.shift_ * s) / (1 + (this.shift_ - 1) * s);
-        }
-
-        // self.timesteps_ = sigmas * self.num_train_timesteps_
-        this.timesteps_ = new Float32Array(sigmas.length);
-        for (let i = 0; i < sigmas.length; i++) this.timesteps_[i] = sigmas[i] * this.num_train_timesteps_;
-
-        // self.sigmas_ = np.append(sigmas, 0.0)
-        this.sigmas_ = appendFloat32(sigmas, 0.0);
-
-        this.num_inference_steps_ = numInferenceSteps;
-        this.step_index_ = 0;
-    }
-}
-
-const scheduler = new Scheduler();
-let schedulerTimesteps;
-let timesteps;
-
-function updateScheduler() {
-    scheduler.setTimesteps(config.numInferenceSteps);
-
-    // read scheduler-generated timesteps (do not overwrite it)
-    schedulerTimesteps = scheduler.timesteps_;
-    if (config.numInferenceSteps !== schedulerTimesteps.length) {
-        throw new Error("Invalid timesteps.");
-    }
-
-    // compute (1000.0 - schedulerTimesteps) / 1000.0
-    timesteps = new Float32Array(schedulerTimesteps.length);
-    for (let i = 0; i < schedulerTimesteps.length; i++) {
-        timesteps[i] = (1000.0 - schedulerTimesteps[i]) / 1000.0;
-    }
-    // set last element to 1.0
-    timesteps[timesteps.length - 1] = 1.0;
-    console.log(`num_inference_steps: ${config.numInferenceSteps}`);
-}
-
-updateScheduler();
-
 /*
  * load models used in the pipeline
  */
@@ -566,7 +292,7 @@ async function loadModels(models) {
     load.disabled = true;
 
     // Apply dimensions and inputs/outputs metadata before session creation
-    updateModelDimensions(config.resolution);
+    updateModelDimensions(resolution);
 
     try {
         for (const [name, model] of Object.entries(models)) {
@@ -598,9 +324,7 @@ async function loadModels(models) {
                 ];
             }
 
-            const sessOpt = { ...opt, ...model.opt };
             const modelFetchTime = (performance.now() - start).toFixed(2);
-
             if (dom[name]) {
                 dom[name].fetch.innerHTML = modelFetchTime;
             }
@@ -608,6 +332,17 @@ async function loadModels(models) {
             log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
             log(`[Session Create] Beginning ${modelNameInLog}`);
 
+            const sessOpt = {
+                executionProviders: [
+                    {
+                        name: config.provider,
+                        deviceType: config.deviceType,
+                        context: mlContext,
+                    },
+                ],
+                logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
+                ...model.opt,
+            };
             start = performance.now();
             console.log(sessOpt);
             models[name].sess = await ort.InferenceSession.create(modelBuffer, sessOpt);
@@ -630,7 +365,7 @@ async function loadModels(models) {
         }
         const startInitTensors = performance.now();
         await initializeTensors();
-        currentResolution = config.resolution;
+        currentResolution = resolution;
 
         log(`[Session Create] Initialize tensors completed · ${(performance.now() - startInitTensors).toFixed(2)}ms`);
     } catch (e) {
@@ -851,38 +586,6 @@ async function runModel(model) {
     }
 }
 
-/**
- * draw image from pixel data
- * @param {Float32Array} pix
- * @param {number} height
- * @param {number} width
- */
-function drawImage(pix, height, width) {
-    const channelSize = height * width;
-    const rgbaData = new Uint8ClampedArray(channelSize * 4);
-
-    for (let j = 0; j < channelSize; j++) {
-        // NCHW layout: R is at 0, G at channelSize, B at 2*channelSize
-        let r = pix[j];
-        let g = pix[j + channelSize];
-        let b = pix[j + 2 * channelSize];
-
-        // Map [-1, 1] to [0, 255]
-        rgbaData[j * 4 + 0] = (r / 2 + 0.5) * 255;
-        rgbaData[j * 4 + 1] = (g / 2 + 0.5) * 255;
-        rgbaData[j * 4 + 2] = (b / 2 + 0.5) * 255;
-        rgbaData[j * 4 + 3] = 255; // Alpha
-    }
-
-    const imageData = new ImageData(rgbaData, width, height);
-    const canvas = $(`#img_canvas`);
-    if (canvas) {
-        canvas.width = width;
-        canvas.height = height;
-        canvas.getContext("2d").putImageData(imageData, 0, 0);
-    }
-}
-
 async function generateImage() {
     generate.disabled = true;
     $("#resolution-select").disabled = true;
@@ -902,13 +605,13 @@ async function generateImage() {
 
         await loading;
 
-        if (currentResolution !== config.resolution) {
-            log(`[Session Run] Re-initializing tensors for resolution ${config.resolution}x${config.resolution}...`);
+        if (currentResolution !== resolution) {
+            log(`[Session Run] Re-initializing tensors for resolution ${resolution}x${resolution}...`);
             let initStart = performance.now();
             disposeTensors();
-            updateModelDimensions(config.resolution);
+            updateModelDimensions(resolution);
             await initializeTensors();
-            currentResolution = config.resolution;
+            currentResolution = resolution;
             log(`[Session Run] Re-initialized tensors in ${(performance.now() - initStart).toFixed(2)}ms`);
         }
 
@@ -919,54 +622,29 @@ async function generateImage() {
         const startTotal = start;
 
         // Run Text Encoder
-        const messages = [{ role: "user", content: prompt.value }];
-        const prompt_with_template = tokenizer.apply_chat_template(messages, {
-            tokenize: false,
-            add_generation_prompt: true,
-            enable_thinking: true,
-        });
+        const promptInputs = await getPromptInputs(prompt.value, maxSequenceLength);
+        sequenceLength = promptInputs.sequenceLength;
 
-        const promptInputs = tokenizer([prompt_with_template], {
-            padding: false,
-            max_length: maxSeqLen,
-            truncation: true,
-            return_tensor: false,
-        });
-        realSeqLen = promptInputs.input_ids[0].length;
-
-        console.log(`Provider: ${config.provider}, seqLen: ${realSeqLen}`);
-
+        console.log("Sequence Length:", sequenceLength);
         // Since the tensors of Text Encoder dynamically allocated according to the effective sequence length,
         // we need to create the tensor here.
         models["text_encoder"].feed = {
-            input_ids: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen], writable: true }),
-            attention_mask: await createTensor({ dataType: "int64", dims: [batchSize, realSeqLen], writable: true }),
+            input_ids: await createTensor({ dataType: "int64", dims: [batchSize, sequenceLength], writable: true }),
+            attention_mask: await createTensor({
+                dataType: "int64",
+                dims: [batchSize, sequenceLength],
+                writable: true,
+            }),
         };
         models["text_encoder"].fetches = {
             encoder_hidden_state: await createTensor({
                 dataType: dataType,
-                dims: [batchSize, realSeqLen, 2560],
+                dims: [batchSize, sequenceLength, 2560],
             }),
         };
 
-        console.log("Prompt after applying chat template:", prompt_with_template);
-        console.log("Tokenized input IDs:", promptInputs.input_ids);
-        console.log("Tokenized attention mask:", promptInputs.attention_mask);
-
-        // Ensure we have exactly seqLen elements
-        const inputIdsRaw = promptInputs.input_ids[0];
-        const attentionMaskRaw = promptInputs.attention_mask[0];
-
-        const inputIdsData = new BigInt64Array(realSeqLen);
-        const attentionMaskData = new BigInt64Array(realSeqLen);
-
-        for (let i = 0; i < realSeqLen; i++) {
-            inputIdsData[i] = i < inputIdsRaw.length ? BigInt(inputIdsRaw[i]) : 0n;
-            attentionMaskData[i] = i < attentionMaskRaw.length ? BigInt(attentionMaskRaw[i]) : 1n; // default to 1 for valid tokens
-        }
-
-        writeTensor(models["text_encoder"].feed.input_ids, inputIdsData);
-        writeTensor(models["text_encoder"].feed.attention_mask, attentionMaskData);
+        writeTensor(models["text_encoder"].feed.input_ids, promptInputs.inputIds);
+        writeTensor(models["text_encoder"].feed.attention_mask, promptInputs.attentionMask);
 
         await runModel(models["text_encoder"]);
 
@@ -987,7 +665,7 @@ async function generateImage() {
 
         writeTensor(tensorA, latents);
 
-        for (let i = 0; i < config.numInferenceSteps; i++) {
+        for (let i = 0; i < numInferenceSteps; i++) {
             start = performance.now();
             // Inference prepare for Transformer
             models["transformer"].feed.encoder_hidden_states = models["text_encoder"].fetches["encoder_hidden_state"];
@@ -1005,7 +683,7 @@ async function generateImage() {
 
             // Use ONNX helper model for the scheduler Euler step
             start = performance.now();
-            writeTensor(models["scheduler_step"].feed.step_info, new Float32Array([i, config.numInferenceSteps]));
+            writeTensor(models["scheduler_step"].feed.step_info, new Float32Array([i, numInferenceSteps]));
 
             await runModel(models["scheduler_step"]);
 
@@ -1056,7 +734,7 @@ async function generateImage() {
         }
 
         start = performance.now();
-        drawImage(pix, imageHeight, imageWidth);
+        drawImage(pix, imageHeight, imageWidth, $(`#img_canvas`));
         const imageDrawTime = (performance.now() - start).toFixed(2);
         log(`[Image Drawing] drawing image time: ${imageDrawTime}ms`);
 
@@ -1142,9 +820,9 @@ async function generateImage() {
 }
 
 const checkWebNN = async () => {
-    let status = $("#webnnstatus");
-    let info = $("#info");
-    webnnStatus = await getWebnnStatus();
+    const status = $("#webnnstatus");
+    const info = $("#info");
+    const webnnStatus = await getWebnnStatus();
 
     if (webnnStatus.webnn) {
         status.setAttribute("class", "green");
@@ -1161,10 +839,6 @@ const checkWebNN = async () => {
             info.innerHTML = "WebNN not supported";
             logError(`[Error] WebNN not supported`);
         }
-    }
-
-    if (getQueryValue("provider") && getQueryValue("provider").toLowerCase() === "webgpu") {
-        status.innerHTML = "";
     }
 };
 
@@ -1199,8 +873,8 @@ const getWebnnStatus = async () => {
 };
 
 const updateLoadWave = value => {
-    loadwave = $$(".loadwave");
-    loadwaveData = $$(".loadwave-data strong");
+    const loadwave = $$(".loadwave");
+    const loadwaveData = $$(".loadwave-data strong");
 
     if (loadwave && loadwaveData) {
         loadwave.forEach(l => {
@@ -1228,15 +902,12 @@ const updateDeviceTypeLinks = () => {
 
 const ui = async () => {
     memoryReleaseSwitch = $("#memory_release");
-    device = $("#device");
-    badge = $("#badge");
+    const device = $("#device");
+    const badge = $("#badge");
     const prompt = $("#user-input");
     const title = $("#title");
     const dev = $("#dev");
     const scTr = $("#scTr");
-    load = $("#load");
-    generate = $("#generate");
-    buttons = $("#buttons");
 
     log("[Load] ONNX Runtime loaded");
 
@@ -1252,16 +923,8 @@ const ui = async () => {
         dev.setAttribute("class", "mt-1");
     }
 
-    await setupORT("sdxl-turbo", "dev");
-    showCompatibleChromiumVersion("sdxl-turbo");
-
-    if (getQueryValue("provider") && getQueryValue("provider").toLowerCase() === "webgpu") {
-        title.innerHTML = "WebGPU";
-        $("#webnnstatus").hidden = true;
-        load.disabled = false;
-    } else {
-        await checkWebNN();
-    }
+    await setupORT("z-image-turbo", "stable");
+    showCompatibleChromiumVersion("z-image-turbo");
 
     for (const [modelName, prefix] of Object.entries(modelDOMPrefixes)) {
         dom[modelName] = {
@@ -1274,73 +937,58 @@ const ui = async () => {
 
     switch (config.provider) {
         case "webgpu":
+            title.innerHTML = "WebGPU";
+            $("#webnnstatus").hidden = true;
+            load.disabled = false;
             if (!("gpu" in navigator)) {
                 throw new Error("webgpu is NOT supported");
             }
-            opt.executionProviders = [
-                {
-                    name: "webgpu",
-                },
-            ];
             break;
         case "webnn":
-            webnnStatus = await getWebnnStatus();
+            await checkWebNN();
+            const webnnStatus = await getWebnnStatus();
             if (webnnStatus.webnn) {
                 if (config.useIOBinding) {
                     mlContext = await navigator.ml.createContext({ deviceType: config.deviceType });
                 }
-                opt.executionProviders = [
-                    {
-                        name: "webnn",
-                        deviceType: config.deviceType,
-                        context: mlContext,
-                    },
-                ];
             }
             break;
         default:
             throw new Error(`The provider ${config.provider} is not supported.`);
     }
 
-    const deviceType = config.deviceType.toLowerCase();
-    const provider = config.provider.toLowerCase();
-
-    if (deviceType === "cpu") {
+    if (config.deviceType === "cpu") {
         device.innerHTML = "CPU";
         badge.setAttribute("class", "cpu");
         document.body.setAttribute("class", "cpu");
-    } else if (deviceType === "gpu" || provider === "webgpu") {
+    } else if (config.deviceType === "gpu" || config.provider === "webgpu") {
         device.innerHTML = "GPU";
         badge.setAttribute("class", "");
         document.body.setAttribute("class", "gpu");
-    } else if (deviceType === "npu") {
+    } else if (config.deviceType === "npu") {
         device.innerHTML = "NPU";
         badge.setAttribute("class", "npu");
         document.body.setAttribute("class", "npu");
     }
 
+    // Initialize inference steps
+    const stepsInput = $("#steps-input");
+    numInferenceSteps = parseInt(stepsInput.value);
+    timesteps = updateScheduler(numInferenceSteps);
+    stepsInput.addEventListener("change", e => {
+        let val = parseInt(e.target.value);
+        if (val < 3) val = 3;
+        if (val > 9) val = 9;
+        e.target.value = val;
+        numInferenceSteps = val;
+        timesteps = updateScheduler(numInferenceSteps);
+    });
+
     // Initialize resolution
     const resolutionSelect = $("#resolution-select");
-
-    resolutionSelect.value = config.resolution.toString();
+    resolution = parseInt(resolutionSelect.value);
     resolutionSelect.addEventListener("change", e => {
-        const res = parseInt(e.target.value);
-        config.resolution = res;
-        config.numInferenceSteps = res === 1024 ? 3 : 9;
-        updateScheduler();
-    });
-
-    prompt.value =
-        "极具氛围感的暗调人像，一位优雅的中国美女在黑暗的房间里。一束强光通过遮光板，在她的脸上投射出一个清晰的闪电形状的光影，正好照亮一只眼睛。高对比度，明暗交界清晰，神秘感，莱卡相机色调。";
-
-    // Event listener for Ctrl + Enter or CMD + Enter
-    prompt.addEventListener("keydown", e => {
-        if (e.ctrlKey && e.key === "Enter") {
-            generateImage();
-        }
-    });
-    generate.addEventListener("click", () => {
-        generateImage();
+        resolution = parseInt(e.target.value);
     });
 
     // Seed randomize button
@@ -1348,9 +996,28 @@ const ui = async () => {
     randomSeedBtn.addEventListener("click", () => {
         $("#seed-input").value = Math.floor(Math.random() * 2147483647);
     });
-
     // Initialize with a random seed on load
     $("#seed-input").value = Math.floor(Math.random() * 2147483647);
+
+    if (config.language === "zh") {
+        prompt.value =
+            "极具氛围感的暗调人像，一位优雅的中国美女在黑暗的房间里。一束强光通过遮光板，在她的脸上投射出一个清晰的闪电形状的光影，正好照亮一只眼睛。高对比度，明暗交界清晰，神秘感，莱卡相机色调。";
+    } else {
+        prompt.value =
+            "A moody and atmospheric portrait of an elegant Chinese beauty in a dark room. A strong beam of light shines through a gobo, casting a sharp lightning-shaped shadow across her face, illuminating just one eye. High contrast, clear chiaroscuro, mysterious vibe, Leica camera tones.";
+    }
+    const promptInputs = await getPromptInputs(prompt.value, maxSequenceLength);
+    $("#token-info").innerHTML = `${maxSequenceLength - promptInputs.sequenceLength}/${maxSequenceLength} tokens left`;
+
+    prompt.addEventListener("input", async () => {
+        const promptInputs = await getPromptInputs(prompt.value, maxSequenceLength);
+        const leftTokenLength = maxSequenceLength - promptInputs.sequenceLength;
+        $("#token-info").innerHTML = `${leftTokenLength <= 0 ? 0 : leftTokenLength}/${maxSequenceLength} tokens left`;
+    });
+
+    generate.addEventListener("click", () => {
+        generateImage();
+    });
 
     const loadModelUi = () => {
         // Show performance data table when loading starts
