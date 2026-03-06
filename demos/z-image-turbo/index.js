@@ -50,7 +50,7 @@ let imageHeight = resolution;
 let imageWidth = resolution;
 
 // Hard code for WebNN test
-let sequenceLength = 67;
+let sequenceLength = 113;
 
 const models = {
     text_encoder: {
@@ -588,6 +588,7 @@ async function runModel(model) {
 
 async function generateImage() {
     generate.disabled = true;
+    prompt.disabled = true;
     $("#resolution-select").disabled = true;
     $("#seed-input").disabled = true;
     $("#random-seed").disabled = true;
@@ -809,6 +810,7 @@ async function generateImage() {
             }
         }
         generate.disabled = false;
+        prompt.disabled = false;
         $("#resolution-select").disabled = false;
         $("#seed-input").disabled = false;
         $("#random-seed").disabled = false;
@@ -1000,11 +1002,15 @@ const ui = async () => {
     $("#seed-input").value = Math.floor(Math.random() * 2147483647);
 
     if (config.language === "zh") {
+        // prompt.value =
+        //     "极具氛围感的暗调人像，一位优雅的中国美女在黑暗的房间里。一束强光通过遮光板，在她的脸上投射出一个清晰的闪电形状的光影，正好照亮一只眼睛。高对比度，明暗交界清晰，神秘感，莱卡相机色调。";
         prompt.value =
-            "极具氛围感的暗调人像，一位优雅的中国美女在黑暗的房间里。一束强光通过遮光板，在她的脸上投射出一个清晰的闪电形状的光影，正好照亮一只眼睛。高对比度，明暗交界清晰，神秘感，莱卡相机色调。";
+            "在宁静的花园里，黄昏时分，一位年轻的中国女性优雅地站着，身穿金线刺绣的红色汉服。她的肤色完美，额头上有红色花纹，衬托出她温暖的微笑和富有表现力的眼睛。她的头发梳成高盘发，装饰着金色凤凰头饰，手中拿着一把描绘自然景象的圆形折扇。四周环绕着樱花树，花瓣在微风中轻轻飘落，远处的西安大雁塔增添了画面的深度，完美融合了传统与现代。";
     } else {
+        // prompt.value =
+        //     "A moody and atmospheric portrait of an elegant Chinese beauty in a dark room. A strong beam of light shines through a gobo, casting a sharp lightning-shaped shadow across her face, illuminating just one eye. High contrast, clear chiaroscuro, mysterious vibe, Leica camera tones.";
         prompt.value =
-            "A moody and atmospheric portrait of an elegant Chinese beauty in a dark room. A strong beam of light shines through a gobo, casting a sharp lightning-shaped shadow across her face, illuminating just one eye. High contrast, clear chiaroscuro, mysterious vibe, Leica camera tones.";
+            "In a tranquil garden at dusk, a young Chinese woman stands gracefully in a red Hanfu with gold embroidery. Her flawless complexion features a red floral pattern on her forehead, enhancing her warm smile and expressive eyes. With her hair styled in a high bun adorned with a golden phoenix headdress, she holds a round folding fan decorated with nature scenes. Cherry blossom trees surround her, their petals drifting in the breeze, while a silhouetted pagoda (西安大雁塔) adds depth, blending tradition with modernity.";
     }
     const promptInputs = await getPromptInputs(prompt.value, maxSequenceLength);
     $("#token-info").innerHTML = `${maxSequenceLength - promptInputs.sequenceLength}/${maxSequenceLength} tokens left`;
