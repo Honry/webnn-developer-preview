@@ -82,13 +82,21 @@ export class LLM {
             );
         }
         const sessionOptions = {
-            executionProviders: [{ name: this.provider, deviceType: this.deviceType, context: this.mlContext }],
+            executionProviders: [{ name: this.provider, deviceType: this.deviceType, context: this.mlContext, freeDimensionBounds: {
+                sequence_length: { maxSize: this.maxLength},
+                total_sequence_length: { maxSize: this.maxLength},
+            }}],
             externalData: [
                 {
                     data: externalDataBytes,
                     path: externalFile,
                 },
             ],
+            extra: {
+                session: {
+                strict_shape_type_inference: '1',
+                },
+            },
         };
 
         if (verbose) {
@@ -99,8 +107,6 @@ export class LLM {
         if (this.provider == "webnn") {
             sessionOptions.freeDimensionOverrides = {
                 batch_size: 1,
-                sequence_length: this.maxLength,
-                total_sequence_length: this.maxLength,
                 past_sequence_length: this.maxLength,
             };
         }
@@ -120,24 +126,24 @@ export class LLM {
         progressBarLabel.innerHTML = `Prefill session created · ${loadProgress.toFixed(2)}%`;
 
         log("Prefill session created");
-        if (this.provider == "webnn") {
-            // Decode process
-            sessionOptions.freeDimensionOverrides = {
-                batch_size: 1,
-                sequence_length: 1,
-                total_sequence_length: this.maxLength,
-                past_sequence_length: this.maxLength,
-            };
-            log("Create session for decode process");
-            console.log("Create session 2 with option: ");
-            console.log({ ...sessionOptions });
-            this.session2 = await WebNNPerf.time(
-                "webnn.session.create",
-                () => ort.InferenceSession.create(modelBytes, sessionOptions),
-                { model: `${modelName}-decode` },
-            );
-            log("Decode process session created");
-        }
+        // if (this.provider == "webnn") {
+        //     // Decode process
+        //     sessionOptions.freeDimensionOverrides = {
+        //         batch_size: 1,
+        //         sequence_length: 1,
+        //         total_sequence_length: this.maxLength,
+        //         past_sequence_length: this.maxLength,
+        //     };
+        //     log("Create session for decode process");
+        //     console.log("Create session 2 with option: ");
+        //     console.log({ ...sessionOptions });
+        //     this.session2 = await WebNNPerf.time(
+        //         "webnn.session.create",
+        //         () => ort.InferenceSession.create(modelBytes, sessionOptions),
+        //         { model: `${modelName}-decode` },
+        //     );
+        //     log("Decode process session created");
+        // }
 
         if (this.provider == "webgpu") {
             this.gpuDevice = ort.env.webgpu.device;
@@ -306,10 +312,10 @@ export class LLM {
     async generate(inputIds, callback) {
         this.outputTokens = [];
         const inputIdsLen = inputIds.length;
-        const attnMaskLen = this.provider == "webnn" ? inputIdsLen : this.startLength + inputIdsLen;
+        const attnMaskLen = this.startLength + inputIdsLen;
         let attnMask = Array.from({ length: attnMaskLen }, () => BigInt(1));
         let positionIds = Array.from({ length: inputIdsLen }, (_, i) =>
-            BigInt(this.provider == "webnn" ? i++ : this.startLength + i++),
+            BigInt(this.startLength + i++),
         );
         // Both input_ids and position_ids have shapes of [batch_size, sequence_length].
         // The sequence_length is the length of inputIds, which is dynamic.
@@ -321,9 +327,9 @@ export class LLM {
         // its input shapes will be [1, 14, 32768, 64] x [1, 14, 64, 32768] = [1, 14, 32768, 32768]
         // which exceeds the 2GB tensor size limitation.
         if (this.provider == "webnn") {
-            inputIds = this.paddingInput(inputIds, this.maxLength);
-            positionIds = this.paddingInput(positionIds, this.maxLength);
-            attnMask = this.paddingInput(attnMask, this.maxLength);
+            // inputIds = this.paddingInput(inputIds, this.maxLength);
+            // positionIds = this.paddingInput(positionIds, this.maxLength);
+            // attnMask = this.paddingInput(attnMask, this.maxLength);
         }
 
         this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIds.length]);
@@ -332,7 +338,7 @@ export class LLM {
         this.stop = false;
 
         // shape of logits in prefill
-        const prefillLogitsShape = [1, this.provider == "webnn" ? this.maxLength : inputIdsLen, this.vocabSize];
+        const prefillLogitsShape = [1, inputIdsLen, this.vocabSize];
         const numElementsOfPrefillLogits = prefillLogitsShape.reduce((a, b) => a * b, 1);
         const prefillLogitsBufferSize = numElementsOfPrefillLogits * Float16Array.BYTES_PER_ELEMENT;
         let lastToken = 0;
@@ -373,7 +379,7 @@ export class LLM {
         }
         this.fetches["logits"] = undefined;
 
-        this.startLength = this.provider == "webnn" ? inputIdsLen : this.startLength + inputIdsLen;
+        this.startLength = this.startLength + inputIdsLen;
         this.outputTokens.push(lastToken);
         if (callback) {
             callback(this.outputTokens);
@@ -382,12 +388,7 @@ export class LLM {
         this.updateKvCache(outputs);
         while (this.eos.indexOf(lastToken) == -1 && !this.stop && this.startLength < this.maxLength) {
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
-
-            if (this.provider == "webnn") {
-                attnMask[this.startLength] = 1n;
-            } else {
-                attnMask.push(1n);
-            }
+            attnMask.push(1n);
             this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
             this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(this.startLength)]), [1, 1]);
 
@@ -402,7 +403,7 @@ export class LLM {
                         true,
                     );
                 }
-                outputs = await WebNNPerf.time("webnn.inference", () => this.session2.run(this.feed, this.fetches), {
+                outputs = await WebNNPerf.time("webnn.inference", () => this.session1.run(this.feed, this.fetches), {
                     model: "decode",
                     iteration: this.outputTokens.length,
                 });

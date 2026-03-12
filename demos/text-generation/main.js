@@ -331,11 +331,7 @@ async function Query(continuation, query, cb) {
     performanceIndicator.innerHTML = "";
     logUser(`Prompt: ${query}`);
     let userChatTemplate = { role: "user", content: query };
-    messages.push(userChatTemplate);
-
-    if (config.provider == "webgpu") {
-        messages = [userChatTemplate];
-    }
+    messages = [userChatTemplate];
 
     let inputIds = tokenizer.apply_chat_template(messages, {
         add_generation_prompt: true,
