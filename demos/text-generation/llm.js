@@ -51,6 +51,7 @@ export class LLM {
         this.headSize = model.head_size;
         this.kvDims = [1, model.kv_num_heads, this.maxLength, model.head_size];
         this.vocabSize = model.vocab_size;
+        this.hasPositionIds = model.has_position_ids ? false : true;
         this.decodeLogitsBuffer = new Float16Array(this.vocabSize);
         log(`WebNN EP config: ${model.name} · ${this.provider} · ${this.deviceType}`);
 
@@ -82,10 +83,17 @@ export class LLM {
             );
         }
         const sessionOptions = {
-            executionProviders: [{ name: this.provider, deviceType: this.deviceType, context: this.mlContext, freeDimensionBounds: {
-                sequence_length: { maxSize: this.maxLength},
-                total_sequence_length: { maxSize: this.maxLength},
-            }}],
+            executionProviders: [
+                {
+                    name: this.provider,
+                    deviceType: this.deviceType,
+                    context: this.mlContext,
+                    freeDimensionBounds: {
+                        sequence_length: { maxSize: this.maxLength },
+                        total_sequence_length: { maxSize: this.maxLength },
+                    },
+                },
+            ],
             externalData: [
                 {
                     data: externalDataBytes,
@@ -94,7 +102,7 @@ export class LLM {
             ],
             extra: {
                 session: {
-                strict_shape_type_inference: '1',
+                    strict_shape_type_inference: "1",
                 },
             },
         };
@@ -314,9 +322,6 @@ export class LLM {
         const inputIdsLen = inputIds.length;
         const attnMaskLen = this.startLength + inputIdsLen;
         let attnMask = Array.from({ length: attnMaskLen }, () => BigInt(1));
-        let positionIds = Array.from({ length: inputIdsLen }, (_, i) =>
-            BigInt(this.startLength + i++),
-        );
         // Both input_ids and position_ids have shapes of [batch_size, sequence_length].
         // The sequence_length is the length of inputIds, which is dynamic.
         // Since WebNN does not support dynamic shapes, fix the sequence_length to maxLength and
@@ -334,7 +339,13 @@ export class LLM {
 
         this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIds.length]);
         this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
-        this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [1, positionIds.length]);
+        if (this.hasPositionIds) {
+            const positionIds = Array.from({ length: inputIdsLen }, (_, i) => BigInt(this.startLength + i++));
+            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [
+                1,
+                positionIds.length,
+            ]);
+        }
         this.stop = false;
 
         // shape of logits in prefill
@@ -390,8 +401,13 @@ export class LLM {
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
             attnMask.push(1n);
             this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
-            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(this.startLength)]), [1, 1]);
-
+            if (this.hasPositionIds) {
+                this.feed["position_ids"] = new ort.Tensor(
+                    "int64",
+                    BigInt64Array.from([BigInt(this.startLength)]),
+                    [1, 1],
+                );
+            }
             if (this.provider == "webnn") {
                 // Pre-allocate logits ml-tensor once
                 if (!this.fetches["logits"]) {
