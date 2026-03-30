@@ -16,7 +16,7 @@ import {
     updateQueryStringParameter,
     getHuggingFaceDomain,
 } from "../../assets/js/common_utils.js";
-import { env, AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2";
+import { env, AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers";
 import { LLM } from "./llm.js";
 import { marked } from "https://cdn.jsdelivr.net/npm/marked/lib/marked.esm.js";
 
