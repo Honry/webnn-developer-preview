@@ -270,7 +270,7 @@ async function submitRequest(e) {
     autoScroller.observe(responseDiv);
 
     Query(continuation, input, word => {
-        if (config.model.enable_thinking === false) {
+        if (config.model.end_think_token_id) {
             responseDiv.innerHTML = formatWithThinking(word);
         } else {
             responseDiv.innerHTML = marked.parse(word);
@@ -504,7 +504,7 @@ async function Query(continuation, query, cb) {
         skip_special_tokens: config.show_special != 1,
     });
     // For conversation history, strip thinking (model shouldn't see its own thinking in context)
-    if (config.model.enable_thinking === false) {
+    if (config.model.end_think_token_id) {
         outputContent = stripThinkingContent(outputContent);
     }
     let assistentChatTemplate = { role: "assistant", content: outputContent };
