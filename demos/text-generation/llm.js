@@ -35,7 +35,10 @@ export class LLM {
     maxLength = 2048;
     mlContext = undefined;
     startLength = 0;
-    decodeLogitsBuffer = undefined;
+    logitsBuffer = undefined;
+    repetitionPenalty = 1.0;
+    temperature = 0.0;
+    topK = 0;
 
     constructor(maxLength) {
         this.maxLength = maxLength;
@@ -51,8 +54,14 @@ export class LLM {
         this.headSize = model.head_size;
         this.kvDims = [1, model.kv_num_heads, this.maxLength, model.head_size];
         this.vocabSize = model.vocab_size;
-        this.hasPositionIds = model.has_position_ids ? false : true;
-        this.decodeLogitsBuffer = new Float16Array(this.vocabSize);
+        this.hasPositionIds = !!model.has_position_ids;
+        this.repetitionPenalty = model.repetition_penalty || 1.0;
+        this.temperature = model.temperature || 0.0;
+        this.topK = model.top_k || 0;
+        this.topP = model.top_p || 1.0;
+        this.endThinkTokenId = model.end_think_token_id || 0; // token ID for </think>
+        this.maxThinkTokens = model.max_think_tokens || 0; // 0 = no limit
+        this.logitsBuffer = new Float16Array(this.vocabSize);
         log(`WebNN EP config: ${model.name} · ${this.provider} · ${this.deviceType}`);
 
         const path = options.local ? model.local_path : model.remote_path;
@@ -121,7 +130,7 @@ export class LLM {
 
         let progressBarLabel = $("#p-bar-label");
         log("Create session for prefill process");
-        console.log("Create session 1 with option: ");
+        console.log("Create session with option: ");
         console.log({ ...sessionOptions });
         this.session1 = await WebNNPerf.time(
             "webnn.session.create",
@@ -133,25 +142,7 @@ export class LLM {
         updateProgressBar(loadProgress.toFixed(2));
         progressBarLabel.innerHTML = `Prefill session created · ${loadProgress.toFixed(2)}%`;
 
-        log("Prefill session created");
-        // if (this.provider == "webnn") {
-        //     // Decode process
-        //     sessionOptions.freeDimensionOverrides = {
-        //         batch_size: 1,
-        //         sequence_length: 1,
-        //         total_sequence_length: this.maxLength,
-        //         past_sequence_length: this.maxLength,
-        //     };
-        //     log("Create session for decode process");
-        //     console.log("Create session 2 with option: ");
-        //     console.log({ ...sessionOptions });
-        //     this.session2 = await WebNNPerf.time(
-        //         "webnn.session.create",
-        //         () => ort.InferenceSession.create(modelBytes, sessionOptions),
-        //         { model: `${modelName}-decode` },
-        //     );
-        //     log("Decode process session created");
-        // }
+        log("Session created");
 
         if (this.provider == "webgpu") {
             this.gpuDevice = ort.env.webgpu.device;
@@ -228,6 +219,13 @@ export class LLM {
                     false,
                 );
             }
+            this.fetches["logits"] = await createMlTensor(
+                this.mlContext,
+                "float16",
+                [1, 1, this.vocabSize],
+                false,
+                true,
+            );
         } else if (this.provider == "webgpu") {
             // Pre-allocate kv cache gpu-buffer
             const numElements = this.kvDims.reduce((a, b) => a * b, 1);
@@ -252,6 +250,12 @@ export class LLM {
                 this.fetches[`present.${i}.key`] = this.feed[`past_key_values.${i}.key`];
                 this.fetches[`present.${i}.value`] = this.feed[`past_key_values.${i}.value`];
             }
+            this.fetches["logits"] = createGpuTensor(
+                this.gpuDevice,
+                "float16",
+                [1, 1, this.vocabSize],
+                this.vocabSize * Float16Array.BYTES_PER_ELEMENT,
+            );
         } else {
             // Initialize kv cache as empty tensors for WASM EP
             const numElements = this.kvDims.reduce((a, b) => a * b, 1);
@@ -260,6 +264,11 @@ export class LLM {
                 this.feed[`past_key_values.${i}.key`] = new ort.Tensor("float16", emptyTensor, this.kvDims);
                 this.feed[`past_key_values.${i}.value`] = new ort.Tensor("float16", emptyTensor, this.kvDims);
             }
+            this.fetches["logits"] = new ort.Tensor("float16", new Float16Array(this.vocabSize), [
+                1,
+                1,
+                this.vocabSize,
+            ]);
         }
     }
 
@@ -297,9 +306,31 @@ export class LLM {
         this.stop = true;
     }
 
+    // Apply repetition penalty to logits for tokens that already appeared
+    // Uses frequency-based penalty: penalty^min(count, maxCount) to avoid over-penalizing common words
+    applyRepetitionPenalty(logits, vocabSize, generatedTokens, penalty) {
+        if (penalty === 1.0 || generatedTokens.length === 0) return;
+        const maxCount = 3; // Cap frequency to avoid destroying common word probabilities
+        // Count frequency of each token
+        const freq = new Map();
+        for (const tokenId of generatedTokens) {
+            freq.set(tokenId, (freq.get(tokenId) || 0) + 1);
+        }
+        for (const [tokenId, count] of freq) {
+            if (tokenId >= 0 && tokenId < vocabSize) {
+                const effectivePenalty = Math.pow(penalty, Math.min(count, maxCount));
+                if (logits[tokenId] > 0) {
+                    logits[tokenId] = logits[tokenId] / effectivePenalty;
+                } else {
+                    logits[tokenId] = logits[tokenId] * effectivePenalty;
+                }
+            }
+        }
+    }
+
     // Poor man's argmax
-    argmax(arr, sequenceLength = 1, vocabSize) {
-        let start = vocabSize * (sequenceLength - 1);
+    argmax(arr, vocabSize) {
+        let start = 0;
         let max = arr[start];
         let maxIndex = 0;
 
@@ -316,26 +347,92 @@ export class LLM {
         return maxIndex;
     }
 
+    // Sample from logits using temperature, top-k and top-p (nucleus) sampling
+    sampleTopK(logits, vocabSize, temperature, topK, topP) {
+        // Build array of {index, logit} pairs
+        const candidates = new Array(vocabSize);
+        for (let i = 0; i < vocabSize; i++) {
+            candidates[i] = { index: i, logit: Number(logits[i]) };
+        }
+
+        // Sort by logit descending
+        candidates.sort((a, b) => b.logit - a.logit);
+
+        // Top-k filtering
+        const k = topK > 0 ? Math.min(topK, vocabSize) : vocabSize;
+        let filtered = candidates.slice(0, k);
+
+        // Apply temperature and compute softmax
+        const scaledLogits = filtered.map(c => c.logit / temperature);
+        const maxLogit = scaledLogits[0];
+        const expValues = scaledLogits.map(l => Math.exp(l - maxLogit));
+        const sumExp = expValues.reduce((a, b) => a + b, 0);
+        const probs = expValues.map(e => e / sumExp);
+
+        // Top-p (nucleus) filtering: keep smallest set of tokens whose cumulative prob >= topP
+        if (topP < 1.0) {
+            let cumProb = 0;
+            let cutoff = probs.length;
+            for (let i = 0; i < probs.length; i++) {
+                cumProb += probs[i];
+                if (cumProb >= topP) {
+                    cutoff = i + 1;
+                    break;
+                }
+            }
+            // Re-normalize probabilities over the nucleus
+            filtered = filtered.slice(0, cutoff);
+            const nucleusProbs = probs.slice(0, cutoff);
+            const nucleusSum = nucleusProbs.reduce((a, b) => a + b, 0);
+            const normalizedProbs = nucleusProbs.map(p => p / nucleusSum);
+
+            // Sample from nucleus
+            const r = Math.random();
+            let cumulative = 0;
+            for (let i = 0; i < normalizedProbs.length; i++) {
+                cumulative += normalizedProbs[i];
+                if (r < cumulative) {
+                    return filtered[i].index;
+                }
+            }
+            return filtered[filtered.length - 1].index;
+        }
+
+        // Sample from the distribution (no top-p)
+        const r = Math.random();
+        let cumulative = 0;
+        for (let i = 0; i < probs.length; i++) {
+            cumulative += probs[i];
+            if (r < cumulative) {
+                return filtered[i].index;
+            }
+        }
+        return filtered[filtered.length - 1].index;
+    }
+
+    // Select next token: sampling if temperature > 0, otherwise greedy argmax
+    selectToken(logits, vocabSize) {
+        if (this.temperature > 0) {
+            return this.sampleTopK(logits, vocabSize, this.temperature, this.topK, this.topP);
+        }
+        return this.argmax(logits, vocabSize);
+    }
+
     // Prefill prompt and generate tokens, greedy search only
     async generate(inputIds, callback) {
         this.outputTokens = [];
         const inputIdsLen = inputIds.length;
         const attnMaskLen = this.startLength + inputIdsLen;
-        let attnMask = Array.from({ length: attnMaskLen }, () => BigInt(1));
-        // Both input_ids and position_ids have shapes of [batch_size, sequence_length].
-        // The sequence_length is the length of inputIds, which is dynamic.
-        // Since WebNN does not support dynamic shapes, fix the sequence_length to maxLength and
-        // pad the rest elements with 0 value.
-        // TODO: This may cause an overflow error if maxLength is excessively large,
-        // as it could exceed the allowable array size or memory limits.
-        // e.g. QWen2.0 supports max_length: 32768, in a matmul of the GQA decomposed op,
-        // its input shapes will be [1, 14, 32768, 64] x [1, 14, 64, 32768] = [1, 14, 32768, 32768]
-        // which exceeds the 2GB tensor size limitation.
-        if (this.provider == "webnn") {
-            // inputIds = this.paddingInput(inputIds, this.maxLength);
-            // positionIds = this.paddingInput(positionIds, this.maxLength);
-            // attnMask = this.paddingInput(attnMask, this.maxLength);
+
+        // Guard: total sequence length must not exceed maxLength
+        if (attnMaskLen > this.maxLength) {
+            throw new Error(
+                `Total sequence length (${attnMaskLen}) exceeds maxLength (${this.maxLength}). ` +
+                    `startLength=${this.startLength}, inputIdsLen=${inputIdsLen}. Use Ctrl+Enter to start a new conversation.`,
+            );
         }
+
+        let attnMask = Array.from({ length: attnMaskLen }, () => BigInt(1));
 
         this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIds.length]);
         this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
@@ -347,51 +444,34 @@ export class LLM {
             ]);
         }
         this.stop = false;
-
-        // shape of logits in prefill
-        const prefillLogitsShape = [1, inputIdsLen, this.vocabSize];
-        const numElementsOfPrefillLogits = prefillLogitsShape.reduce((a, b) => a * b, 1);
-        const prefillLogitsBufferSize = numElementsOfPrefillLogits * Float16Array.BYTES_PER_ELEMENT;
         let lastToken = 0;
-        if (this.provider == "webnn") {
-            this.fetches["logits"] = await createMlTensor(this.mlContext, "float16", prefillLogitsShape, false, true);
-        } else if (this.provider == "webgpu") {
-            this.fetches["logits"] = createGpuTensor(
-                this.gpuDevice,
-                "float16",
-                prefillLogitsShape,
-                prefillLogitsBufferSize,
-            );
-        }
         let outputs = await WebNNPerf.time("webnn.inference.first", () => this.session1.run(this.feed, this.fetches), {
             model: "prefill",
         });
-        this.prefillLogitsBuffer = new Float16Array(numElementsOfPrefillLogits);
+
         if (this.provider == "webnn") {
-            await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.prefillLogitsBuffer);
+            await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.logitsBuffer);
         } else if (this.provider == "webgpu") {
             await readBackGpuTensor(
                 this.gpuDevice,
                 this.fetches["logits"].gpuBuffer,
-                prefillLogitsBufferSize,
-                this.prefillLogitsBuffer,
+                this.vocabSize * Float16Array.BYTES_PER_ELEMENT,
+                this.logitsBuffer,
             );
         } else {
-            this.prefillLogitsBuffer = outputs["logits"].cpuData;
+            this.logitsBuffer = outputs["logits"].cpuData;
         }
 
-        lastToken = this.argmax(this.prefillLogitsBuffer, inputIdsLen, this.vocabSize);
+        this.applyRepetitionPenalty(this.logitsBuffer, this.vocabSize, this.outputTokens, this.repetitionPenalty);
+        lastToken = this.selectToken(this.logitsBuffer, this.vocabSize);
 
-        // Clean up the logits tensor after prefill
-        if (this.provider == "webnn") {
-            this.fetches["logits"].mlTensor.destroy();
-        } else if (this.provider == "webgpu") {
-            this.fetches["logits"].gpuBuffer.destroy();
-        }
-        this.fetches["logits"] = undefined;
+        // Thinking budget: force </think> if model hasn't produced it within budget
+        let thinkingDone = false;
+        const hasThinkBudget = this.endThinkTokenId > 0 && this.maxThinkTokens > 0;
 
         this.startLength = this.startLength + inputIdsLen;
         this.outputTokens.push(lastToken);
+        if (lastToken === this.endThinkTokenId) thinkingDone = true;
         if (callback) {
             callback(this.outputTokens);
         }
@@ -409,30 +489,19 @@ export class LLM {
                 );
             }
             if (this.provider == "webnn") {
-                // Pre-allocate logits ml-tensor once
-                if (!this.fetches["logits"]) {
-                    this.fetches["logits"] = await createMlTensor(
-                        this.mlContext,
-                        "float16",
-                        [1, 1, this.vocabSize], // shape of logits in decode
-                        false,
-                        true,
-                    );
-                }
                 outputs = await WebNNPerf.time("webnn.inference", () => this.session1.run(this.feed, this.fetches), {
                     model: "decode",
                     iteration: this.outputTokens.length,
                 });
-                await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.decodeLogitsBuffer);
+                await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.logitsBuffer);
             } else if (this.provider == "webgpu") {
-                const decodeLogitsBufferSize = this.vocabSize * Float16Array.BYTES_PER_ELEMENT;
                 if (!this.fetches["logits"]) {
                     // Pre-allocate logits gpu-buffer once
                     this.fetches["logits"] = createGpuTensor(
                         this.gpuDevice,
                         "float16",
                         [1, 1, this.vocabSize],
-                        decodeLogitsBufferSize,
+                        this.vocabSize * Float16Array.BYTES_PER_ELEMENT,
                     );
                 }
                 outputs = await WebNNPerf.time("webnn.inference", () => this.session1.run(this.feed, this.fetches), {
@@ -442,18 +511,36 @@ export class LLM {
                 await readBackGpuTensor(
                     this.gpuDevice,
                     this.fetches["logits"].gpuBuffer,
-                    decodeLogitsBufferSize,
-                    this.decodeLogitsBuffer,
+                    this.vocabSize * Float16Array.BYTES_PER_ELEMENT,
+                    this.logitsBuffer,
                 );
             } else {
                 outputs = await WebNNPerf.time("webnn.inference", () => this.session1.run(this.feed, this.fetches), {
                     model: "decode-wasm",
                     iteration: this.outputTokens.length,
                 });
-                this.decodeLogitsBuffer = outputs["logits"].cpuData;
+                this.logitsBuffer = outputs["logits"].cpuData;
             }
 
-            lastToken = this.argmax(this.decodeLogitsBuffer, 1, this.vocabSize);
+            this.applyRepetitionPenalty(this.logitsBuffer, this.vocabSize, this.outputTokens, this.repetitionPenalty);
+            lastToken = this.selectToken(this.logitsBuffer, this.vocabSize);
+
+            // Thinking budget: if model hasn't emitted </think> within budget, force it
+            if (hasThinkBudget && !thinkingDone && this.outputTokens.length >= this.maxThinkTokens) {
+                console.warn(
+                    `[LLM] Thinking budget (${this.maxThinkTokens}) exceeded, forcing </think> token ${this.endThinkTokenId}`,
+                );
+                lastToken = this.endThinkTokenId;
+                thinkingDone = true;
+            }
+            if (lastToken === this.endThinkTokenId) thinkingDone = true;
+
+            // Break on consecutive repeat (same token 3+ times in a row)
+            const len = this.outputTokens.length;
+            if (len >= 2 && this.outputTokens[len - 1] === lastToken && this.outputTokens[len - 2] === lastToken) {
+                console.warn(`[LLM] Breaking: token ${lastToken} repeated 3x consecutively`);
+                break;
+            }
 
             this.outputTokens.push(lastToken);
             if (callback) {
@@ -461,13 +548,6 @@ export class LLM {
             }
             this.updateKvCache(outputs);
             this.startLength++;
-        }
-
-        // Clean up the logits tensor after decode
-        if (this.provider == "webnn") {
-            this.fetches["logits"].mlTensor.destroy();
-        } else if (this.provider == "webgpu") {
-            this.fetches["logits"].gpuBuffer.destroy();
         }
 
         return this.outputTokens;

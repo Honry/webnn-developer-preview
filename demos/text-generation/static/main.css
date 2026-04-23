@@ -45,6 +45,45 @@
     margin: 0;
 }
 
+.thinking-content {
+    color: #999;
+    font-style: italic;
+    font-size: 0.9em;
+    border-left: 3px solid #ccc;
+    padding-left: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.thinking-content p {
+    margin: 0.25rem 0;
+}
+
+.thinking-label {
+    font-weight: 600;
+    color: #aaa;
+    font-size: 0.85em;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    padding: 0.25rem 0;
+}
+
+.thinking-label::-webkit-details-marker {
+    display: none;
+}
+
+.thinking-label::before {
+    content: "\25B6";
+    display: inline-block;
+    margin-right: 0.4rem;
+    font-size: 0.7em;
+    transition: transform 0.2s;
+}
+
+details.thinking-content[open] > .thinking-label::before {
+    transform: rotate(90deg);
+}
+
 .response-message-outer .copy-button svg {
     width: 1rem !important;
     height: 1rem !important;
@@ -243,6 +282,21 @@
 .models #tinyllama.active svg path {
     fill: #fe5165;
     stroke: #fe5165;
+}
+
+.models button#llama32 svg path {
+    stroke: gray;
+    stroke-width: 20;
+}
+
+.models button#llama32:hover svg path {
+    fill: #0467df;
+    stroke: #0467df;
+}
+
+.models #llama32.active svg path {
+    fill: #0467df;
+    stroke: #0467df;
 }
 
 .models button#deepseekr1:hover svg path {

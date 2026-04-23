@@ -28,13 +28,14 @@ const MODELS = {
         file_name: "model.onnx",
         local_path: "models/TinyLlama/TinyLlama-1.1B-Chat-v1.0/",
         remote_path: "https://huggingface.co/webnn/TinyLlama-1.1B-Chat-v1.0-onnx/resolve/main/",
-        eos_token_id: [151645, 151643, 2],
+        eos_token_id: [2],
         max_length: 2048,
         num_layers: 22,
         kv_num_heads: 4,
         head_size: 64,
         vocab_size: 32000,
-        system_content: "You are a friendly chatbot who always responds in the style of a pirate", // "You are MiniThinky, a helpful AI assistant. You always think before giving the answer. Use <|thinking|> before thinking and <|answer|> before giving the answer."
+        has_position_ids: false,
+        system_content: "",
     },
     phi4mini: {
         name: "Phi-4 Mini Instruct",
@@ -50,6 +51,7 @@ const MODELS = {
         kv_num_heads: 8,
         head_size: 128,
         vocab_size: 200064,
+        has_position_ids: false,
         system_content: "You are a helpful AI assistant.",
     },
     qwen2: {
@@ -65,6 +67,7 @@ const MODELS = {
         kv_num_heads: 2,
         head_size: 64,
         vocab_size: 151936,
+        has_position_ids: false,
         system_content: "You are a helpful assistant.",
     },
     qwen3: {
@@ -80,7 +83,24 @@ const MODELS = {
         kv_num_heads: 8,
         head_size: 128,
         vocab_size: 151936,
-        has_position_ids: true,
+        has_position_ids: false,
+        enable_thinking: false,
+        system_content: "You are a helpful assistant.",
+    },
+    llama32: {
+        name: "Llama 3.2 3B Instruct",
+        desc: "Meta Llama-3.2-3B-Instruct",
+        id: "meta-llama/Llama-3.2-3B-Instruct",
+        file_name: "model.onnx",
+        local_path: "models/meta-llama/Llama-3.2-3B-Instruct/",
+        remote_path: "https://huggingface.co/webnn/Llama-3.2-3B-Instruct-onnx/resolve/main/",
+        eos_token_id: [128001, 128008, 128009],
+        max_length: 131072,
+        num_layers: 28,
+        kv_num_heads: 8,
+        head_size: 128,
+        vocab_size: 128256,
+        has_position_ids: false,
         system_content: "You are a helpful assistant.",
     },
     deepseekr1: {
@@ -98,7 +118,15 @@ const MODELS = {
         kv_num_heads: 2,
         head_size: 128,
         vocab_size: 151936,
-        system_content: "",
+        has_position_ids: false,
+        enable_thinking: false,
+        repetition_penalty: 1.2,
+        temperature: 0.6,
+        top_k: 50,
+        top_p: 0.95,
+        end_think_token_id: 151649,
+        max_think_tokens: 300,
+        system_content: "You are a helpful assistant. Answer questions directly and concisely.",
     },
 };
 
@@ -242,7 +270,11 @@ async function submitRequest(e) {
     autoScroller.observe(responseDiv);
 
     Query(continuation, input, word => {
-        responseDiv.innerHTML = marked.parse(word);
+        if (config.model.enable_thinking === false) {
+            responseDiv.innerHTML = formatWithThinking(word);
+        } else {
+            responseDiv.innerHTML = marked.parse(word);
+        }
     })
         .then(() => {
             chatHistory.context = responseDiv.innerHTML;
@@ -337,9 +369,46 @@ let messages = [];
 if (config.model.system_content) {
     messages.push({ role: "system", content: config.model.system_content });
 }
+function formatWithThinking(text) {
+    const hasCloseThink = text.includes("</think>");
+    if (hasCloseThink) {
+        // Thinking complete: split into thinking + answer
+        const parts = text.split("</think>");
+        let thinkPart = parts[0].replace(/^<think>\s*/, "").trim();
+        let answerPart = parts.slice(1).join("</think>").trim();
+        // Remove stray </> tags
+        answerPart = answerPart.replace(/<\/>\s*$/g, "").trim();
+        let html = "";
+        if (thinkPart) {
+            html += `<details class="thinking-content"><summary class="thinking-label">Thinking</summary>${marked.parse(thinkPart)}</details>`;
+        }
+        if (answerPart) {
+            html += marked.parse(answerPart);
+        }
+        return html;
+    } else {
+        // Still thinking - show open
+        let thinkContent = text.replace(/^<think>\s*/, "").trim();
+        if (thinkContent) {
+            return `<details class="thinking-content" open><summary class="thinking-label">Thinking...</summary>${marked.parse(thinkContent)}</details>`;
+        }
+        return `<details class="thinking-content" open><summary class="thinking-label">Thinking...</summary></details>`;
+    }
+}
+
+function stripThinkingContent(text) {
+    // Remove <think>...</think> blocks (including empty ones)
+    text = text.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
+    // Remove orphaned thinking content before </think>
+    // (when <think> was in the prompt, not in output tokens)
+    text = text.replace(/^[\s\S]*?<\/think>\s*/g, "");
+    // Remove stray closing tags like </> that small models may emit
+    text = text.replace(/<\/>\s*$/g, "").trim();
+    return text;
+}
 
 function tokenToText(tokenizer, tokens) {
-    const text = tokenizer.decode(tokens, { skip_special_tokens: config.show_special != 1 });
+    let text = tokenizer.decode(tokens, { skip_special_tokens: config.show_special != 1 });
     return text;
 }
 
@@ -347,47 +416,78 @@ async function Query(continuation, query, cb) {
     performanceIndicator.innerHTML = "";
     logUser(`Prompt: ${query}`);
     let userChatTemplate = { role: "user", content: query };
-    messages = [userChatTemplate];
 
-    let inputIds = tokenizer.apply_chat_template(messages, {
+    // For continuation, accumulate conversation history; otherwise start fresh
+    if (!continuation || messages.length === 0) {
+        messages = [];
+        if (config.model.system_content) {
+            messages.push({ role: "system", content: config.model.system_content });
+        }
+    }
+    messages.push(userChatTemplate);
+
+    const chatTemplateOptions = {
         add_generation_prompt: true,
         tokenize: true,
         return_tensor: false,
-    });
+    };
+    // Pass enable_thinking if the model defines it (e.g., Qwen3)
+    if (config.model.enable_thinking !== undefined) {
+        chatTemplateOptions.enable_thinking = config.model.enable_thinking;
+    }
 
-    // Clean up
+    let inputIds = tokenizer.apply_chat_template(messages, chatTemplateOptions);
+
+    // Extract input_ids if apply_chat_template returns an object (e.g. { input_ids, attention_mask })
+    if (inputIds && !Array.isArray(inputIds) && inputIds.input_ids) {
+        inputIds = inputIds.input_ids;
+    }
+
+    // For continuation, only feed the new (delta) tokens to the model since KV cache has the old context
+    const deltaTokens = inputIds.length - llm.startLength;
     if (
-        llm.outputTokens.length == 0 ||
-        !continuation ||
-        cleanCache ||
-        inputIds.length >= llm.maxLength ||
-        llm.startLength >= llm.maxLength
+        llm.outputTokens.length > 0 &&
+        continuation &&
+        !cleanCache &&
+        deltaTokens > 0 &&
+        llm.startLength + deltaTokens <= llm.maxLength
     ) {
-        // Initialize kv cache
+        // Slice off only the new tokens that the KV cache hasn't seen
+        inputIds = inputIds.slice(llm.startLength);
+        logUser(
+            `Continuation: feeding ${inputIds.length} new tokens (startLength=${llm.startLength}, total=${llm.startLength + inputIds.length}/${llm.maxLength})`,
+        );
+    } else {
+        // Full initialization
         await llm.initialize();
         llm.startLength = 0;
-        cleanCache = true;
+        cleanCache = false;
         if (inputIds.length > llm.maxLength) {
             console.log(`Context length exceeds max new tokens, clean up...`);
-        }
-        // Clean up messages if there is a cache
-        if (messages.length > 2) {
-            if (messages[0]["role"] == "system") {
-                messages = messages.slice(0, 1);
-            } else {
-                messages = [];
+            // Trim conversation to fit
+            messages = [];
+            if (config.model.system_content) {
+                messages.push({ role: "system", content: config.model.system_content });
             }
             messages.push(userChatTemplate);
-            inputIds = tokenizer.apply_chat_template(messages, {
+            const overflowOptions = {
                 add_generation_prompt: true,
                 tokenize: true,
                 return_tensor: false,
-            });
+            };
+            if (config.model.enable_thinking !== undefined) {
+                overflowOptions.enable_thinking = config.model.enable_thinking;
+            }
+            inputIds = tokenizer.apply_chat_template(messages, overflowOptions);
+            if (inputIds && !Array.isArray(inputIds) && inputIds.input_ids) {
+                inputIds = inputIds.input_ids;
+            }
         }
     }
     console.log("messages: ", messages);
+
     // Convert inputIds to BigInt
-    inputIds = inputIds.map(num => BigInt(num));
+    inputIds = Array.from(inputIds).map(num => BigInt(num));
     logUser(`Prompt length: ${inputIds.length}`);
 
     let timeToFirstToken;
@@ -400,9 +500,13 @@ async function Query(continuation, query, cb) {
         cb(tokenToText(tokenizer, outputTokens));
     });
 
-    const outputContent = tokenizer.decode(outputTokens, {
+    let outputContent = tokenizer.decode(outputTokens, {
         skip_special_tokens: config.show_special != 1,
     });
+    // For conversation history, strip thinking (model shouldn't see its own thinking in context)
+    if (config.model.enable_thinking === false) {
+        outputContent = stripThinkingContent(outputContent);
+    }
     let assistentChatTemplate = { role: "assistant", content: outputContent };
     messages.push(assistentChatTemplate);
     cleanCache = false;
