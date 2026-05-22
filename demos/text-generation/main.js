@@ -311,7 +311,7 @@ $("#user-input").addEventListener("keydown", async function (e) {
 
 function getConfig() {
     const query = window.location.search.substring(1);
-    var config = {
+    const config = {
         model: "phi4mini",
         provider: "webnn",
         deviceType: "gpu",
@@ -321,6 +321,7 @@ function getConfig() {
         show_special: 0,
         csv: 0,
         max_length: 512,
+        enable_causallm: 0,
         local: 0,
     };
     let vars = query.split("&");
@@ -584,6 +585,7 @@ const main = async () => {
             profiler: config.profiler,
             verbose: config.verbose,
             local: config.local,
+            enable_causallm: config.enable_causallm,
         });
         sendButton.disabled = false;
         ready = true;

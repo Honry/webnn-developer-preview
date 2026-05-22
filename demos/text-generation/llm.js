@@ -52,7 +52,10 @@ export class LLM {
         this.numLayers = model.num_layers;
         this.kvNumHeads = model.kv_num_heads;
         this.headSize = model.head_size;
-        this.kvDims = [1, model.kv_num_heads, this.maxLength, model.head_size];
+        this.enableCausalLM = !!options.enable_causallm;
+        this.kvDims = this.enableCausalLM
+            ? [1, model.kv_num_heads, 1, model.head_size]
+            : [1, model.kv_num_heads, this.maxLength, model.head_size];
         this.vocabSize = model.vocab_size;
         this.hasPositionIds = !!model.has_position_ids;
         this.repetitionPenalty = model.repetition_penalty || 1.0;
@@ -97,8 +100,10 @@ export class LLM {
                     name: this.provider,
                     deviceType: this.deviceType,
                     context: this.mlContext,
+                    enableCausalLM: this.enableCausalLM,
                     freeDimensionBounds: {
                         sequence_length: { maxSize: this.maxLength },
+                        ...(this.enableCausalLM && { past_sequence_length: { maxSize: this.maxLength } }),
                         total_sequence_length: { maxSize: this.maxLength },
                     },
                 },
@@ -122,10 +127,9 @@ export class LLM {
         }
 
         if (this.provider == "webnn") {
-            sessionOptions.freeDimensionOverrides = {
-                batch_size: 1,
-                past_sequence_length: this.maxLength,
-            };
+            sessionOptions.freeDimensionOverrides = this.enableCausalLM
+                ? { batch_size: 1 }
+                : { batch_size: 1, past_sequence_length: this.maxLength };
         }
 
         let progressBarLabel = $("#p-bar-label");
@@ -204,21 +208,25 @@ export class LLM {
                     false,
                 );
 
-                this.fetches[`present.${i}.key`] = await createMlTensor(
-                    this.mlContext,
-                    "float16",
-                    this.kvDims,
-                    false,
-                    false,
-                );
-                this.fetches[`present.${i}.value`] = await createMlTensor(
-                    this.mlContext,
-                    "float16",
-                    this.kvDims,
-                    false,
-                    false,
-                );
+                if (!this.enableCausalLM) {
+                    // Stateless: pre-allocate present KV at full size for swap
+                    this.fetches[`present.${i}.key`] = await createMlTensor(
+                        this.mlContext,
+                        "float16",
+                        this.kvDims,
+                        false,
+                        false,
+                    );
+                    this.fetches[`present.${i}.value`] = await createMlTensor(
+                        this.mlContext,
+                        "float16",
+                        this.kvDims,
+                        false,
+                        false,
+                    );
+                }
             }
+            // Stateful (enableCausalLM): no present KV pre-allocation — concat produces dynamic-sized outputs
             this.fetches["logits"] = await createMlTensor(
                 this.mlContext,
                 "float16",
