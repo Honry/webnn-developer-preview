@@ -37,6 +37,22 @@ const MODELS = {
         has_position_ids: false,
         system_content: "",
     },
+    tinyllama128: {
+        name: "TinyLlama 1.1B Chat v1.0 (block-128)",
+        desc: "TinyLlama-1.1B-Chat-v1.0 with MatMulNBits block size 128",
+        id: "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        file_name: "model.onnx",
+        local_path: "models/TinyLlama/webnn-tinyllama-1.1b-v1.0-128-block-size/",
+        remote_path: "https://huggingface.co/webnn/TinyLlama-1.1B-Chat-v1.0-onnx/resolve/main/",
+        eos_token_id: [2],
+        max_length: 2048,
+        num_layers: 22,
+        kv_num_heads: 4,
+        head_size: 64,
+        vocab_size: 32000,
+        has_position_ids: false,
+        system_content: "",
+    },
     phi4mini: {
         name: "Phi-4 Mini Instruct",
         desc: "Microsoft Phi-4 Mini Instruct",
@@ -604,7 +620,7 @@ const ui = async () => {
     const currentUrl = window.location.href;
 
     let model = getQueryValue("model");
-    if (model) {
+    if (model && $(`#${model}`)) {
         $(`#${model}`).setAttribute("class", "button active");
     }
 
