@@ -24,8 +24,7 @@ import { WebNNPerf } from "../webnn-perf.js";
 // Class to handle a large language model on top of onnxruntime-web
 export class LLM {
     provider = "webnn";
-    session1 = undefined;
-    session2 = undefined;
+    session = undefined;
     feed = {};
     fetches = {};
     outputTokens = [];
@@ -39,6 +38,7 @@ export class LLM {
     repetitionPenalty = 1.0;
     temperature = 0.0;
     topK = 0;
+    _generating = null; // Promise that resolves when current generate() finishes
 
     constructor(maxLength) {
         this.maxLength = maxLength;
@@ -136,7 +136,7 @@ export class LLM {
         log("Create session for prefill process");
         console.log("Create session with option: ");
         console.log({ ...sessionOptions });
-        this.session1 = await WebNNPerf.time(
+        this.session = await WebNNPerf.time(
             "webnn.session.create",
             () => ort.InferenceSession.create(modelBytes, sessionOptions),
             { model: `${modelName}-prefill` },
@@ -185,13 +185,34 @@ export class LLM {
 
     // Initialize key value caches
     async initialize() {
-        // Dispose previous tensors
-        this.disposeTensors(this.feed);
-        this.disposeTensors(this.fetches);
+        // If a previous generate() is still in-flight (e.g. user pressed Ctrl+Enter
+        // during generation), abort it and wait for session.run() to complete.
+        // Without this, the next dispatch() would fail with "Invalid input tensor state"
+        // because MLTensors are still in "dispatched" state from the previous run.
+        if (this._generating) {
+            this.stop = true;
+            try {
+                await this._generating;
+            } catch (e) {
+                /* ignore */
+            }
+        }
 
-        this.feed = {};
         if (this.provider == "webnn") {
-            // Pre-allocate kv cache ml-tensor
+            // TODO(enableCausalLM): When enableCausalLM is true, the KV cache is managed
+            // internally by the underlying OV backend. Currently there is no WebNN API to
+            // reset the internal KV cache state, so starting a new conversation (Ctrl+Enter)
+            // may carry over stale context. A future WebNN API (e.g. MLContext.resetState())
+            // is needed to properly clear the backend-managed KV cache.
+            if (this.feed[`past_key_values.0.key`]) {
+                // Tensors already created — nothing to do on reinitialize for WebNN.
+                // The ORT IO binding cache holds references to these tensor objects;
+                // destroying or recreating them causes "Invalid input tensor state".
+                return;
+            }
+            // First time: create all tensors
+            this.feed = {};
+            this.fetches = {};
             for (let i = 0; i < this.numLayers; ++i) {
                 this.feed[`past_key_values.${i}.key`] = await createMlTensor(
                     this.mlContext,
@@ -226,7 +247,7 @@ export class LLM {
                     );
                 }
             }
-            // Stateful (enableCausalLM): no present KV pre-allocation — concat produces dynamic-sized outputs
+            // Stateful (enableCausalLM): no present KV pre-allocation
             this.fetches["logits"] = await createMlTensor(
                 this.mlContext,
                 "float16",
@@ -235,6 +256,12 @@ export class LLM {
                 true,
             );
         } else if (this.provider == "webgpu") {
+            // For WebGPU: destroy old tensors and recreate (WebGPU doesn't have the same
+            // IO binding cache issue as WebNN)
+            this.disposeTensors(this.feed);
+            this.disposeTensors(this.fetches);
+            this.feed = {};
+            this.fetches = {};
             // Pre-allocate kv cache gpu-buffer
             const numElements = this.kvDims.reduce((a, b) => a * b, 1);
             const bufferSize = numElements * Float16Array.BYTES_PER_ELEMENT;
@@ -265,7 +292,9 @@ export class LLM {
                 this.vocabSize * Float16Array.BYTES_PER_ELEMENT,
             );
         } else {
-            // Initialize kv cache as empty tensors for WASM EP
+            // WASM EP: just recreate with zeroed tensors (no IO binding cache issue)
+            this.feed = {};
+            this.fetches = {};
             const numElements = this.kvDims.reduce((a, b) => a * b, 1);
             const emptyTensor = new Float16Array(numElements);
             for (let i = 0; i < this.numLayers; ++i) {
@@ -428,7 +457,25 @@ export class LLM {
 
     // Prefill prompt and generate tokens, greedy search only
     async generate(inputIds, callback) {
+        // Track this generation so initialize() can wait for it to complete
+        let resolveGenerating;
+        this._generating = new Promise(r => {
+            resolveGenerating = r;
+        });
+
+        try {
+            return await this._doGenerate(inputIds, callback);
+        } finally {
+            resolveGenerating();
+            this._generating = null;
+        }
+    }
+
+    async _doGenerate(inputIds, callback) {
         this.outputTokens = [];
+        this.inferenceTimeSum = 0; // Total inference time for decode tokens (ms)
+        this.sessionRunTimeSum = 0; // Total session.run() time for decode tokens (ms)
+        this.inferenceTokenCount = 0; // Number of decode tokens timed
         const inputIdsLen = inputIds.length;
         const attnMaskLen = this.startLength + inputIdsLen;
 
@@ -453,9 +500,10 @@ export class LLM {
         }
         this.stop = false;
         let lastToken = 0;
-        let outputs = await WebNNPerf.time("webnn.inference.first", () => this.session1.run(this.feed, this.fetches), {
-            model: "prefill",
-        });
+        // let outputs = await WebNNPerf.time("webnn.inference.first", () => this.session.run(this.feed, this.fetches), {
+        //     model: "prefill",
+        // });
+        let outputs = await this.session.run(this.feed, this.fetches);
 
         if (this.provider == "webnn") {
             await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.logitsBuffer);
@@ -486,6 +534,7 @@ export class LLM {
 
         this.updateKvCache(outputs);
         while (this.eos.indexOf(lastToken) == -1 && !this.stop && this.startLength < this.maxLength) {
+            const startWriteTensor = performance.now();
             this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
             attnMask.push(1n);
             this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
@@ -496,12 +545,27 @@ export class LLM {
                     [1, 1],
                 );
             }
+            console.log(
+                `Token ${this.outputTokens.length}: write input tensors time ${
+                    performance.now() - startWriteTensor
+                } ms`,
+            );
+            const startDecoding = performance.now();
             if (this.provider == "webnn") {
-                outputs = await WebNNPerf.time("webnn.inference", () => this.session1.run(this.feed, this.fetches), {
-                    model: "decode",
-                    iteration: this.outputTokens.length,
-                });
+                // outputs = await WebNNPerf.time("webnn.inference", () => this.session.run(this.feed, this.fetches), {
+                //     model: "decode",
+                //     iteration: this.outputTokens.length,
+                // });
+                await this.session.run(this.feed, this.fetches);
+                const sessionRunTime = performance.now() - startDecoding;
+                this.sessionRunTimeSum += sessionRunTime;
+                console.log(`Token ${this.outputTokens.length}: session.run() time ${sessionRunTime} ms`);
+                const readStart = performance.now();
                 await readBackMLTensor(this.mlContext, this.fetches["logits"].mlTensor, this.logitsBuffer);
+                const readTime = performance.now() - readStart;
+                console.log(`Token ${this.outputTokens.length}: readback() time ${readTime} ms`);
+                this.inferenceTimeSum += readTime;
+                this.inferenceTokenCount++;
             } else if (this.provider == "webgpu") {
                 if (!this.fetches["logits"]) {
                     // Pre-allocate logits gpu-buffer once
@@ -512,27 +576,35 @@ export class LLM {
                         this.vocabSize * Float16Array.BYTES_PER_ELEMENT,
                     );
                 }
-                outputs = await WebNNPerf.time("webnn.inference", () => this.session1.run(this.feed, this.fetches), {
-                    model: "decode-webgpu",
-                    iteration: this.outputTokens.length,
-                });
+                // outputs = await WebNNPerf.time("webnn.inference", () => this.session.run(this.feed, this.fetches), {
+                //     model: "decode-webgpu",
+                //     iteration: this.outputTokens.length,
+                // });
+                const gpuSessionRunStart = performance.now();
+                outputs = await this.session.run(this.feed, this.fetches);
+                this.sessionRunTimeSum += performance.now() - gpuSessionRunStart;
+                const gpuReadStart = performance.now();
                 await readBackGpuTensor(
                     this.gpuDevice,
                     this.fetches["logits"].gpuBuffer,
                     this.vocabSize * Float16Array.BYTES_PER_ELEMENT,
                     this.logitsBuffer,
                 );
+                this.inferenceTimeSum += performance.now() - gpuReadStart;
+                this.inferenceTokenCount++;
             } else {
-                outputs = await WebNNPerf.time("webnn.inference", () => this.session1.run(this.feed, this.fetches), {
-                    model: "decode-wasm",
-                    iteration: this.outputTokens.length,
-                });
+                const wasmRunStart = performance.now();
+                outputs = await this.session.run(this.feed, this.fetches);
+                this.inferenceTimeSum += performance.now() - wasmRunStart;
+                this.inferenceTokenCount++;
                 this.logitsBuffer = outputs["logits"].cpuData;
             }
-
+            const startSelecting = performance.now();
             this.applyRepetitionPenalty(this.logitsBuffer, this.vocabSize, this.outputTokens, this.repetitionPenalty);
             lastToken = this.selectToken(this.logitsBuffer, this.vocabSize);
-
+            console.log(
+                `Token ${this.outputTokens.length}: argmax time ${performance.now() - startSelecting} ms, selected token ID: ${lastToken}`,
+            );
             // Thinking budget: if model hasn't emitted </think> within budget, force it
             if (hasThinkBudget && !thinkingDone && this.outputTokens.length >= this.maxThinkTokens) {
                 console.warn(
@@ -544,12 +616,12 @@ export class LLM {
             if (lastToken === this.endThinkTokenId) thinkingDone = true;
 
             // Break on consecutive repeat (same token 3+ times in a row)
-            const len = this.outputTokens.length;
-            if (len >= 2 && this.outputTokens[len - 1] === lastToken && this.outputTokens[len - 2] === lastToken) {
-                console.warn(`[LLM] Breaking: token ${lastToken} repeated 3x consecutively`);
-                break;
-            }
-
+            // const len = this.outputTokens.length;
+            // if (len >= 2 && this.outputTokens[len - 1] === lastToken && this.outputTokens[len - 2] === lastToken) {
+            //     console.warn(`[LLM] Breaking: token ${lastToken} repeated 3x consecutively`);
+            //     break;
+            // }
+            console.log(`Token ${this.outputTokens.length} generated time: ${performance.now() - startDecoding} ms\n`);
             this.outputTokens.push(lastToken);
             if (callback) {
                 callback(this.outputTokens);
@@ -568,12 +640,8 @@ export class LLM {
 
             this.feed = {};
             this.fetches = {};
-            await this.session1.release();
-            this.session1 = undefined;
-            if (this.session2) {
-                await this.session2.release();
-                this.session2 = undefined;
-            }
+            await this.session.release();
+            this.session = undefined;
         } catch (e) {
             console.log("Error releasing session: ", e);
         }

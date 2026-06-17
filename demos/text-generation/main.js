@@ -103,6 +103,23 @@ const MODELS = {
         enable_thinking: false,
         system_content: "You are a helpful assistant.",
     },
+    qwen3128: {
+        name: "Qwen3 4B Instruct block-128",
+        desc: "Alibaba Qwen3-4B-Instruct block size 128",
+        id: "Qwen/Qwen3-4B-Instruct",
+        file_name: "model.onnx",
+        local_path: "models/Qwen/Qwen3-4B-Instruct-128-block-size/",
+        remote_path: "https://huggingface.co/webnn/Qwen3-4B-Instruct-onnx/resolve/main/",
+        eos_token_id: [151645, 151643],
+        max_length: 40960,
+        num_layers: 36,
+        kv_num_heads: 8,
+        head_size: 128,
+        vocab_size: 151936,
+        has_position_ids: false,
+        enable_thinking: false,
+        system_content: "You are a helpful assistant.",
+    },
     llama32: {
         name: "Llama 3.2 3B Instruct",
         desc: "Meta Llama-3.2-3B-Instruct",
@@ -531,37 +548,22 @@ async function Query(continuation, query, cb) {
     const took = (performance.now() - startTimer) / 1000;
     const timeToNewTokens = took - timeToFirstToken;
     const sequenceLength = outputTokens.length;
+    const tps = (sequenceLength - 1) / timeToNewTokens;
+    const ipot = llm.inferenceTokenCount > 0 ? llm.inferenceTimeSum / llm.inferenceTokenCount : 0;
+    const avgSessionRun = llm.inferenceTokenCount > 0 ? llm.sessionRunTimeSum / llm.inferenceTokenCount : 0;
+
     log(`${sequenceLength} tokens in ${took.toFixed(2)} sec<br/>
     Time to first token: ${timeToFirstToken.toFixed(2)} sec<br/>
-    New tokens per second: ${((sequenceLength - 1) / timeToNewTokens).toFixed(2)} tokens/sec`);
+    New tokens per second: ${tps.toFixed(2)} tokens/sec<br/>
+    IPOT: ${ipot.toFixed(2)} ms/token<br/>
+    Avg session.run(): ${avgSessionRun.toFixed(2)} ms/token`);
 
-    const timeToFirstTokenPerformanceUnit = document.createElement("div");
-    timeToFirstTokenPerformanceUnit.className = "tokens-per-second-performance-unit";
-    timeToFirstTokenPerformanceUnit.innerHTML = `time to first token`;
-    const timeToFirstTokenPerformance = document.createElement("div");
-    timeToFirstTokenPerformance.className = "tokens-per-second-performance-data";
-    timeToFirstTokenPerformance.innerHTML = `${timeToFirstToken.toFixed(2)}s`;
-    const performanceDataTtfs = document.createElement("div");
-    performanceDataTtfs.className = "performance-data";
-    performanceDataTtfs.setAttribute("title", "Time to first token");
-    performanceDataTtfs.appendChild(timeToFirstTokenPerformanceUnit);
-    performanceDataTtfs.appendChild(timeToFirstTokenPerformance);
-
-    const tokensPerSecondPerformance = document.createElement("div");
-    tokensPerSecondPerformance.className = "tokens-per-second-performance-data";
-    tokensPerSecondPerformance.innerHTML = `${((sequenceLength - 1) / timeToNewTokens).toFixed(2)}`;
-    const tokensPerSecondPerformanceUnit = document.createElement("div");
-    tokensPerSecondPerformanceUnit.className = "tokens-per-second-performance-unit";
-    tokensPerSecondPerformanceUnit.innerHTML = `tokens/s`;
-
-    const performanceDataTps = document.createElement("div");
-    performanceDataTps.className = "performance-data";
-    performanceDataTps.setAttribute("title", "tokens per second");
-    performanceDataTps.appendChild(tokensPerSecondPerformance);
-    performanceDataTps.appendChild(tokensPerSecondPerformanceUnit);
-    performanceIndicator.innerHTML = "";
-    performanceIndicator.appendChild(performanceDataTtfs);
-    performanceIndicator.appendChild(performanceDataTps);
+    performanceIndicator.innerHTML =
+        `<span class="perf-metric"><b>${sequenceLength}</b> tokens</span>` +
+        `<span class="perf-metric">TTFT: <b>${timeToFirstToken.toFixed(2)}</b>s</span>` +
+        `<span class="perf-metric">TPOS: <b>${tps.toFixed(2)}</b> tokens/s</span>` +
+        `<span class="perf-metric">IPOT: <b>${ipot.toFixed(2)}</b> ms/token</span>` +
+        `<span class="perf-metric">Avg session.run(): <b>${avgSessionRun.toFixed(2)}</b> ms/token</span>`;
 }
 
 const main = async () => {
@@ -572,6 +574,7 @@ const main = async () => {
     ort.env.wasm.simd = true;
     ort.env.wasm.proxy = false;
     ort.env.logLevel = "warning";
+    // ort.env.trace = true;
 
     log(`ONNX Runtime Web Execution Provider loaded · ${provider.toLowerCase()}`);
 
