@@ -42,6 +42,12 @@ export class LLM {
 
     constructor(maxLength) {
         this.maxLength = maxLength;
+        // Pre-allocated, reused input buffers for the WebNN decode path. Keeping the
+        // attention_mask at a fixed [1, maxLength] shape on every run lets Chromium's WebNN
+        // backend reuse its shape inference / compiled graph instead of re-running it whenever
+        // the sequence length grows. See _doGenerate() for how they are filled.
+        this.attentionMaskData = new BigInt64Array(maxLength);
+        this.inputIdsData = new BigInt64Array(1);
     }
 
     async load(model, options, flag = true) {
@@ -255,6 +261,13 @@ export class LLM {
                 false,
                 true,
             );
+            // Pre-allocated, reused decode input tensors. Mirrors the logits MLTensor above, but
+            // writable instead of readable. Reusing the same tensors every decode step keeps the
+            // input shapes constant (so the WebNN backend can skip re-running shape inference) and
+            // avoids re-uploading through ORT's CPU->MLTensor path each token. input_ids is [1, 1]
+            // (one token per step); attention_mask is a fixed [1, maxLength] right-padded mask.
+            this.feedInputIds = await createMlTensor(this.mlContext, "int64", [1, 1], true, false);
+            this.feedAttentionMask = await createMlTensor(this.mlContext, "int64", [1, this.maxLength], true, false);
         } else if (this.provider == "webgpu") {
             // For WebGPU: destroy old tensors and recreate (WebGPU doesn't have the same
             // IO binding cache issue as WebNN)
@@ -487,16 +500,27 @@ export class LLM {
             );
         }
 
-        let attnMask = Array.from({ length: attnMaskLen }, () => BigInt(1));
+        this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIdsLen]);
 
-        this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from(inputIds), [1, inputIds.length]);
-        this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
+        // attention_mask for prefill is dynamic: [1, attnMaskLen], all ones spanning the cached
+        // context plus the new tokens. Prefill runs once per turn, so its shape does not need to be
+        // pinned; only the decode loop below reuses fixed-shape tensors. The exported models reduce
+        // attention_mask to a sum (seqlens_k = sum - 1, total_sequence_length = sum) and never read
+        // its shape, so ones over [0, attnMaskLen) mark the full context as valid (startLength =
+        // tokens already in the KV cache, inputIdsLen = new delta tokens), preserving context
+        // across conversation turns.
+        let attnMask = Array.from({ length: attnMaskLen }, () => 1n);
+        this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMaskLen]);
+        if (this.provider == "webnn") {
+            // Seed the reusable decode mask buffer with the current context: ones over
+            // [0, attnMaskLen), zeros after. The decode loop then flips one bit per new token while
+            // keeping the fixed [1, maxLength] shape of the pre-allocated attention_mask MLTensor.
+            this.attentionMaskData.fill(1n, 0, attnMaskLen);
+            this.attentionMaskData.fill(0n, attnMaskLen);
+        }
         if (this.hasPositionIds) {
-            const positionIds = Array.from({ length: inputIdsLen }, (_, i) => BigInt(this.startLength + i++));
-            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [
-                1,
-                positionIds.length,
-            ]);
+            const positionIds = Array.from({ length: inputIdsLen }, (_, i) => BigInt(this.startLength + i));
+            this.feed["position_ids"] = new ort.Tensor("int64", BigInt64Array.from(positionIds), [1, inputIdsLen]);
         }
         this.stop = false;
         let lastToken = 0;
@@ -535,9 +559,25 @@ export class LLM {
         this.updateKvCache(outputs);
         while (this.eos.indexOf(lastToken) == -1 && !this.stop && this.startLength < this.maxLength) {
             const startWriteTensor = performance.now();
-            this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
-            attnMask.push(1n);
-            this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [1, attnMask.length]);
+            if (this.provider == "webnn") {
+                // Reuse the pre-allocated decode MLTensors: update the backing buffers, upload them
+                // to the (writable) tensors, and rebind. The shapes never change ([1, 1] input_ids
+                // and [1, maxLength] attention_mask), so the WebNN backend keeps its shape inference
+                // across every decode step, and there is no per-token CPU->MLTensor allocation.
+                this.inputIdsData[0] = BigInt(lastToken);
+                this.attentionMaskData[this.startLength] = 1n; // mark the new token's position valid
+                this.mlContext.writeTensor(this.feedInputIds.mlTensor, this.inputIdsData);
+                this.mlContext.writeTensor(this.feedAttentionMask.mlTensor, this.attentionMaskData);
+                this.feed["input_ids"] = this.feedInputIds;
+                this.feed["attention_mask"] = this.feedAttentionMask;
+            } else {
+                this.feed["input_ids"] = new ort.Tensor("int64", BigInt64Array.from([BigInt(lastToken)]), [1, 1]);
+                attnMask.push(1n);
+                this.feed["attention_mask"] = new ort.Tensor("int64", BigInt64Array.from(attnMask), [
+                    1,
+                    attnMask.length,
+                ]);
+            }
             if (this.hasPositionIds) {
                 this.feed["position_ids"] = new ort.Tensor(
                     "int64",
@@ -635,6 +675,9 @@ export class LLM {
 
     async dispose() {
         try {
+            // The decode-stage input MLTensors (feedInputIds / feedAttentionMask) are bound into
+            // this.feed during generation, so disposeTensors() frees them along with the KV cache.
+            // mlContext.destroy() below is the backstop if decode never ran and they were never bound.
             this.disposeTensors(this.feed);
             this.disposeTensors(this.fetches);
 

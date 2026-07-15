@@ -260,9 +260,16 @@ const loadScriptWithMessage = async version => {
         if (version === "test") {
             await loadScript("onnxruntime-web", "../../assets/dist/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
+        } else if (version === "test-dynamic-shape") {
+            await loadScript("onnxruntime-web", "../../assets/dist-dynamic-dim-poc/ort.webgpu.min.js");
+            return "ONNX Runtime Web: Test version";
         } else if (version === "test-sym") {
             // Test int4 + zp=0
             await loadScript("onnxruntime-web", "../../assets/dist-sym/ort.webgpu.min.js");
+            return "ONNX Runtime Web: Test version";
+        } else if (version === "test-sym-no-zp") {
+            // Test int4 + no-zp
+            await loadScript("onnxruntime-web", "../../assets/dist-sym-no-zp/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
         } else {
             if (version === "latest") {
