@@ -26,19 +26,21 @@ export const updateProgressBar = progress => {
     progressBarInner.style.width = `${progress}%`;
 };
 
-// Get model via Origin Private File System
+// Get model via Origin Private File System — returns a File (Blob subclass).
+// ORT's JSPI build reads byte ranges from it on demand (low memory peak);
+// other builds materialize the whole file. The download streams network →
+// OPFS disk without ever holding the full file in memory.
 export async function getModelOPFS(name, url, updateModel) {
     const root = await navigator.storage.getDirectory();
-    let fileHandle;
 
     async function updateFile() {
         const response = await fetch(url);
-        const buffer = await readResponse(name, response);
-        fileHandle = await root.getFileHandle(name, { create: true });
+        if (!response.ok) throw new Error(`fetch ${url} -> ${response.status}`);
+        const fileHandle = await root.getFileHandle(name, { create: true });
         const writable = await fileHandle.createWritable();
-        await writable.write(buffer);
-        await writable.close();
-        return buffer;
+        // Stream network -> OPFS disk; never hold the whole file in memory.
+        await response.body.pipeThrough(progressStream(name, response)).pipeTo(writable);
+        return await fileHandle.getFile();
     }
 
     if (updateModel) {
@@ -46,71 +48,55 @@ export async function getModelOPFS(name, url, updateModel) {
     }
 
     try {
-        fileHandle = await root.getFileHandle(name);
-        const blob = await fileHandle.getFile();
-        let buffer = await blob.arrayBuffer();
-        if (buffer) {
-            if (name.toLowerCase().indexOf("onnx.data") > -1) {
-                onnxDataFetchProgress = 40.0;
-                loadProgress =
-                    onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
-                updateProgressBar(loadProgress.toFixed(2));
-                progressBarLabel.innerHTML = `Loading ONNX data file · ${loadProgress.toFixed(2)}%`;
-            } else {
-                onnxFetchProgress = 40.0;
-                loadProgress =
-                    onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
-                updateProgressBar(loadProgress.toFixed(2));
-                progressBarLabel.innerHTML = `Loading ONNX file · ${loadProgress.toFixed(2)}%`;
-            }
-
-            return buffer;
+        const fileHandle = await root.getFileHandle(name);
+        // Cache hit: update progress to 40% immediately (same as a completed
+        // download) so the progress bar doesn't stay at 0% when going through
+        // the compile phases.
+        if (name.toLowerCase().indexOf("onnx.data") > -1) {
+            onnxDataFetchProgress = 40.0;
+            loadProgress =
+                onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
+            updateProgressBar(loadProgress.toFixed(2));
+            progressBarLabel.innerHTML = `Loading ONNX data file · ${loadProgress.toFixed(2)}%`;
+        } else {
+            onnxFetchProgress = 40.0;
+            loadProgress =
+                onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
+            updateProgressBar(loadProgress.toFixed(2));
+            progressBarLabel.innerHTML = `Loading ONNX file · ${loadProgress.toFixed(2)}%`;
         }
+        return await fileHandle.getFile(); // cached: File == Blob, read lazily
     } catch (e) {
         console.log(e.message);
         return await updateFile();
     }
 }
 
-async function readResponse(name, response) {
-    const contentLength = response.headers.get("Content-Length");
-    let total = parseInt(contentLength ?? "0");
-    let buffer = new Uint8Array(total);
+// TransformStream that logs download progress without buffering the payload.
+function progressStream(name, response) {
+    const total = parseInt(response.headers.get("Content-Length") ?? "0", 10);
     let loaded = 0;
-
-    const reader = response.body.getReader();
-    async function read() {
-        const { done, value } = await reader.read();
-        if (done) return;
-
-        let newLoaded = loaded + value.length;
-        let fetchProgress = (newLoaded / contentLength) * 100;
-
-        if (name.toLowerCase().indexOf("onnx.data") > -1) {
-            onnxDataFetchProgress = 0.4 * fetchProgress;
-            loadProgress = onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
-            updateProgressBar(loadProgress.toFixed(2));
-            progressBarLabel.innerHTML = `Loading ONNX data file · ${loadProgress.toFixed(2)}%`;
-        } else {
-            onnxFetchProgress = 0.4 * fetchProgress;
-            loadProgress = onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
-            updateProgressBar(loadProgress.toFixed(2));
-            progressBarLabel.innerHTML = `Loading ONNX file · ${loadProgress.toFixed(2)}%`;
-        }
-
-        if (newLoaded > total) {
-            total = newLoaded;
-            let newBuffer = new Uint8Array(total);
-            newBuffer.set(buffer);
-            buffer = newBuffer;
-        }
-        buffer.set(value, loaded);
-        loaded = newLoaded;
-        return read();
-    }
-
-    await read();
-    return buffer;
+    return new TransformStream({
+        transform(chunk, controller) {
+            loaded += chunk.byteLength;
+            const isData = name.toLowerCase().indexOf("onnx.data") > -1;
+            const pct = total > 0 ? (loaded / total) * 100 : (loaded / (loaded + 1)) * 100;
+            if (isData) {
+                onnxDataFetchProgress = 0.4 * pct;
+                loadProgress =
+                    onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
+                updateProgressBar(loadProgress.toFixed(2));
+                progressBarLabel.innerHTML = `Loading ONNX data file · ${loadProgress.toFixed(2)}%`;
+            } else {
+                onnxFetchProgress = 0.4 * pct;
+                loadProgress =
+                    onnxFetchProgress + onnxDataFetchProgress + onnxCompileProgress + onnxDataCompileProgress;
+                updateProgressBar(loadProgress.toFixed(2));
+                progressBarLabel.innerHTML = `Loading ONNX file · ${loadProgress.toFixed(2)}%`;
+            }
+            controller.enqueue(chunk);
+        },
+    });
 }
 
 export function log(i) {

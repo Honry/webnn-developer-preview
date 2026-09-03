@@ -271,6 +271,14 @@ const loadScriptWithMessage = async version => {
             // Test int4 + no-zp
             await loadScript("onnxruntime-web", "../../assets/dist-sym-no-zp/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
+        } else if (version === "test-sym-no-zp-0806") {
+            // Test int4 + no-zp
+            await loadScript("onnxruntime-web", "../../assets/dist-dynamic-dim-poc-llm-8086/ort.jspi.min.js");
+            return "ONNX Runtime Web: Test version";
+        } else if (version === "test-sym-no-zp-0901-cast-rms") {
+            // Test int4 + no-zp
+            await loadScript("onnxruntime-web", "../../assets/dist-dynamic-dim-poc-llm-0901-cast-rms/ort.jspi.min.js");
+            return "ONNX Runtime Web: Test version dist-dynamic-dim-poc-llm-0901-cast-rms";
         } else {
             if (version === "latest") {
                 version = await getLatestOrtWebDevVersion();
