@@ -49,6 +49,8 @@ const progressText = $("#progress-text");
 const finalTime = $("#final-time");
 /** @type {Promise<void>} Promise that resolves when models are loaded */
 let loading;
+// Set once the initial load finishes; gates the rebuild hint.
+let modelsLoaded = false;
 
 const config = getConfig();
 let numInferenceSteps = 9;
@@ -82,14 +84,22 @@ const screenedPreviews = 2;
 
 const maxSequenceLength = 512;
 let resolution = 512;
+// Resolution the current sessions were compiled for.
 let currentResolution = resolution;
 let imageHeight = resolution;
 let imageWidth = resolution;
 
-// Currently only WebGPU is available for this demo, not WebNN which depends dynamic shape support still in development.
-// So set the sequence length to a fixed value for now for internal testing.
-// TODO: Once WebNN supports dynamic shapes, we can remove this and use the actual sequence length from the text encoder inputs.
+// WebNN needs static shapes, so it also pins the sequence length; WebGPU keeps it dynamic.
+// TODO: Drop once WebNN supports dynamic shapes.
+const pinsSequenceLength = config.provider === "webnn";
+
+// Bucketing so small prompt edits don't trigger WebNN rebuilds; disable with ?padSequence=false. The
+// transformer has no attention mask, so padding changes the generated image.
+const sequencePadMultiple = config.padSequence ? 64 : 0;
+// Current prompt's token count (padded if enabled), updated as the prompt is edited.
 let sequenceLength = 113;
+// Sequence length the current sessions were compiled for.
+let currentSequenceLength = sequenceLength;
 // Sequence length the cached text-encoder I/O tensors were built for (0 = none cached).
 let textEncoderSequenceLength = 0;
 
@@ -134,50 +144,50 @@ const models = {
     },
 };
 
-function updateModelDimensions(resolution) {
+// Models whose sessions pin height/width and must be re-created on a resolution change.
+const resolutionDependentModels = ["transformer", "scheduler_step", "vae_pre_process", "vae_decoder", "sc_prep"];
+
+// Models that also pin the sequence length (WebNN only).
+const sequenceLengthDependentModels = ["text_encoder", "transformer"];
+
+// Keeps the other session options, e.g. externalData from the first load.
+function setFreeDimensionOverrides(modelName, overrides) {
+    const model = models[modelName];
+    if (!model) {
+        return;
+    }
+    model.sessionOptions = {
+        ...(model.sessionOptions ?? {}),
+        freeDimensionOverrides: { ...overrides },
+    };
+}
+
+// Takes the dimensions explicitly so the caller can record what the sessions were built for.
+function updateModelDimensions(resolution, sequenceLength) {
     imageHeight = resolution;
     imageWidth = resolution;
 
-    if (config.provider === "webnn") {
-        models["text_encoder"].opt = {
-            freeDimensionOverrides: {
-                sequence_length: sequenceLength,
-                total_sequence_length: sequenceLength,
-            },
-        };
-        models["transformer"].opt = {
-            freeDimensionOverrides: {
-                height: imageHeight / 8,
-                width: imageWidth / 8,
-                cap_seq_len: sequenceLength,
-            },
-        };
-        models["scheduler_step"].opt = {
-            freeDimensionOverrides: {
-                height: imageHeight / 8,
-                width: imageWidth / 8,
-            },
-        };
-        models["vae_pre_process"].opt = {
-            freeDimensionOverrides: {
-                height: imageHeight / 8,
-                width: imageWidth / 8,
-            },
-        };
-        models["vae_decoder"].opt = {
-            freeDimensionOverrides: {
-                latent_height: imageHeight / 8,
-                latent_width: imageWidth / 8,
-            },
-        };
-        if (config.safetyChecker) {
-            models["sc_prep"].opt = {
-                freeDimensionOverrides: {
-                    height: imageHeight,
-                    width: imageWidth,
-                },
-            };
-        }
+    const latentHeight = imageHeight / 8;
+    const latentWidth = imageWidth / 8;
+
+    // Static height/width also helps WebGPU performance, at the cost of a rebuild on resize.
+    setFreeDimensionOverrides("transformer", {
+        height: latentHeight,
+        width: latentWidth,
+        ...(pinsSequenceLength && { cap_seq_len: sequenceLength }),
+    });
+    setFreeDimensionOverrides("scheduler_step", { height: latentHeight, width: latentWidth });
+    setFreeDimensionOverrides("vae_pre_process", { height: latentHeight, width: latentWidth });
+    setFreeDimensionOverrides("vae_decoder", { latent_height: latentHeight, latent_width: latentWidth });
+    if (config.safetyChecker) {
+        setFreeDimensionOverrides("sc_prep", { height: imageHeight, width: imageWidth });
+    }
+
+    if (pinsSequenceLength) {
+        setFreeDimensionOverrides("text_encoder", {
+            sequence_length: sequenceLength,
+            total_sequence_length: sequenceLength,
+        });
     }
 
     models["text_encoder"].inputInfo = {};
@@ -267,6 +277,36 @@ class ProgressManager {
         }
     }
 
+    // Compile-only weights renormalized over the rebuilt subset; nothing is downloaded.
+    getRebuildWeights(modelNames) {
+        const loadWeights = this.getWeights(this.config.safetyChecker);
+        const compileCosts = {};
+        let totalCost = 0;
+        for (const modelName of modelNames) {
+            const cost = loadWeights[modelName]?.compile ?? 0;
+            if (cost > 0) {
+                compileCosts[modelName] = cost;
+                totalCost += cost;
+            }
+        }
+
+        const rebuildWeights = {};
+        for (const [modelName, cost] of Object.entries(compileCosts)) {
+            rebuildWeights[modelName] = { fetch: 0, compile: (cost / totalCost) * 100 };
+        }
+        return rebuildWeights;
+    }
+
+    // endRebuild does not reset, or the wave would flash 0% on the way out.
+    beginRebuild(modelNames) {
+        this.weights = this.getRebuildWeights(modelNames);
+        this.reset();
+    }
+
+    endRebuild() {
+        this.weights = this.getWeights(this.config.safetyChecker);
+    }
+
     update(modelName, stage, percentage) {
         let key = modelName;
         if (modelName.includes("text_encoder")) key = "text_encoder";
@@ -308,107 +348,121 @@ class ProgressManager {
     }
 }
 const progressManager = new ProgressManager(config);
+
+// Fetch a model (OPFS-cached) and create its session; shared by loadModels and rebuildSessions.
+async function createModelSession(modelName, model) {
+    const modelNameInLog = model.name;
+    let startTime = performance.now();
+    // Base directory shared by the model graph and its sibling external data files.
+    let baseUrl = `${config.model}/onnx`;
+    if (baseUrl.includes("huggingface.co")) {
+        await getHuggingFaceDomain().then(domain => {
+            baseUrl = baseUrl.replace("huggingface.co", domain);
+        });
+    }
+    const modelUrl = `${baseUrl}/${model.url}`;
+    log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
+    const modelBuffer = await WebNNPerf.time(
+        "webnn.model.fetch",
+        () =>
+            getModelOPFS(`zimage-${modelUrl.replace(/\//g, "_")}`, modelUrl, false, percentage =>
+                progressManager.update(modelName, "fetch_base", percentage),
+            ),
+        { model: modelName },
+    );
+    if (model.externalDataUrls) {
+        model.sessionOptions = model.sessionOptions || {};
+        model.sessionOptions.externalData = [];
+
+        // Combine per-file download progress into the single fetch_data percentage.
+        const dataProgress = new Array(model.externalDataUrls.length).fill(0);
+        const reportDataProgress = () => {
+            const averageProgress = dataProgress.reduce((total, progress) => total + progress, 0) / dataProgress.length;
+            progressManager.update(modelName, "fetch_data", averageProgress);
+        };
+
+        for (let index = 0; index < model.externalDataUrls.length; index++) {
+            const dataFileName = model.externalDataUrls[index];
+            const dataUrl = `${baseUrl}/${dataFileName}`;
+            const externalDataBlob = await WebNNPerf.time(
+                "webnn.model.fetch",
+                () =>
+                    getModelOPFS(`zimage-${dataUrl.replace(/\//g, "_")}`, dataUrl, false, percentage => {
+                        dataProgress[index] = percentage;
+                        reportDataProgress();
+                    }),
+                { model: `${modelName}-data-${index}` },
+            );
+            model.sessionOptions.externalData.push({
+                data: externalDataBlob,
+                path: dataFileName,
+            });
+        }
+    }
+
+    const modelFetchTime = (performance.now() - startTime).toFixed(2);
+    if (dom[modelName]) {
+        dom[modelName].fetch.innerHTML = modelFetchTime;
+    }
+
+    log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
+    log(`[Session Create] Beginning ${modelNameInLog}`);
+
+    const resolvedSessionOptions = {
+        executionProviders: [
+            {
+                name: config.provider,
+                deviceType: config.deviceType,
+                context: mlContext,
+            },
+        ],
+        logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
+        ...model.sessionOptions,
+    };
+    startTime = performance.now();
+    console.log(resolvedSessionOptions);
+    // InferenceSession.create accepts string | Uint8Array | ArrayBuffer, not a Blob/File,
+    // so materialize the (small) model graph here; the large weights stay as Blobs in externalData.
+    const modelArrayBuffer = await modelBuffer.arrayBuffer();
+    model.session = await ort.InferenceSession.create(modelArrayBuffer, resolvedSessionOptions);
+    const sessionCreationTime = (performance.now() - startTime).toFixed(2);
+
+    if (dom[modelName]) {
+        dom[modelName].create.innerHTML = sessionCreationTime;
+        progressManager.update(modelName, "compile", 100);
+    }
+
+    if (isNormalMode()) {
+        log(`[Session Create] Create ${modelNameInLog} completed · ${sessionCreationTime}ms`);
+    } else {
+        log(`[Session Create] Create ${modelNameInLog} completed`);
+    }
+}
+
 /*
  * load models used in the pipeline
  */
 async function loadModels(models) {
     log("[Load] ONNX Runtime Execution Provider: " + config.provider);
     log("[Load] ONNX Runtime EP device type: " + config.deviceType);
+    if (sequencePadMultiple > 0) {
+        log(
+            `[Load] Prompt padding on: sequence length rounded up to a multiple of ${sequencePadMultiple}. ` +
+                `Fewer rebuilds, but generated images differ from an unpadded run`,
+        );
+    }
     WebNNPerf.configure({ device: config.deviceType, provider: config.provider });
-    updateLoadWave(0.0);
+    progressManager.reset();
     load.disabled = true;
 
-    // Apply dimensions and inputs/outputs metadata before session creation
-    updateModelDimensions(resolution);
+    // Snapshot the settings: the resolution and prompt can change while the models download.
+    const loadResolution = resolution;
+    const loadSequenceLength = sequenceLength;
+    updateModelDimensions(loadResolution, loadSequenceLength);
 
     try {
-        for (const [name, model] of Object.entries(models)) {
-            const modelNameInLog = model.name;
-            let start = performance.now();
-            // Base directory shared by the model graph and its sibling external data files.
-            let baseUrl = `${config.model}/onnx`;
-            if (baseUrl.includes("huggingface.co")) {
-                await getHuggingFaceDomain().then(domain => {
-                    baseUrl = baseUrl.replace("huggingface.co", domain);
-                });
-            }
-            const modelUrl = `${baseUrl}/${model.url}`;
-            log(`[Load] Loading model ${modelNameInLog} · ${model.size}`);
-            const modelBuffer = await WebNNPerf.time(
-                "webnn.model.fetch",
-                () =>
-                    getModelOPFS(`zimage-${modelUrl.replace(/\//g, "_")}`, modelUrl, false, p =>
-                        progressManager.update(name, "fetch_base", p),
-                    ),
-                { model: name },
-            );
-            if (model.externalDataUrls) {
-                model.opt = model.opt || {};
-                model.opt.externalData = [];
-
-                // Combine per-file download progress into the single fetch_data percentage.
-                const dataProgress = new Array(model.externalDataUrls.length).fill(0);
-                const reportDataProgress = () => {
-                    const average = dataProgress.reduce((a, b) => a + b, 0) / dataProgress.length;
-                    progressManager.update(name, "fetch_data", average);
-                };
-
-                for (let i = 0; i < model.externalDataUrls.length; i++) {
-                    const dataFileName = model.externalDataUrls[i];
-                    const dataUrl = `${baseUrl}/${dataFileName}`;
-                    const externalDataBlob = await WebNNPerf.time(
-                        "webnn.model.fetch",
-                        () =>
-                            getModelOPFS(`zimage-${dataUrl.replace(/\//g, "_")}`, dataUrl, false, p => {
-                                dataProgress[i] = p;
-                                reportDataProgress();
-                            }),
-                        { model: `${name}-data-${i}` },
-                    );
-                    model.opt.externalData.push({
-                        data: externalDataBlob,
-                        path: dataFileName,
-                    });
-                }
-            }
-
-            const modelFetchTime = (performance.now() - start).toFixed(2);
-            if (dom[name]) {
-                dom[name].fetch.innerHTML = modelFetchTime;
-            }
-
-            log(`[Load] ${modelNameInLog} loaded · ${modelFetchTime}ms`);
-            log(`[Session Create] Beginning ${modelNameInLog}`);
-
-            const sessOpt = {
-                executionProviders: [
-                    {
-                        name: config.provider,
-                        deviceType: config.deviceType,
-                        context: mlContext,
-                    },
-                ],
-                logSeverityLevel: config.verbose ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
-                ...model.opt,
-            };
-            start = performance.now();
-            console.log(sessOpt);
-            // InferenceSession.create accepts string | Uint8Array | ArrayBuffer, not a Blob/File,
-            // so materialize the (small) model graph here; the large weights stay as Blobs in externalData.
-            const modelArrayBuffer = await modelBuffer.arrayBuffer();
-            models[name].sess = await ort.InferenceSession.create(modelArrayBuffer, sessOpt);
-            const sessionCreationTime = (performance.now() - start).toFixed(2);
-
-            if (dom[name]) {
-                dom[name].create.innerHTML = sessionCreationTime;
-                progressManager.update(name, "compile", 100);
-            }
-
-            if (isNormalMode()) {
-                log(`[Session Create] Create ${modelNameInLog} completed · ${sessionCreationTime}ms`);
-            } else {
-                log(`[Session Create] Create ${modelNameInLog} completed`);
-            }
+        for (const [modelName, model] of Object.entries(models)) {
+            await createModelSession(modelName, model);
         }
 
         if (config.provider === "webgpu") {
@@ -416,7 +470,8 @@ async function loadModels(models) {
         }
         const startInitTensors = performance.now();
         await initializeTensors();
-        currentResolution = resolution;
+        currentResolution = loadResolution;
+        currentSequenceLength = loadSequenceLength;
 
         log(`[Session Create] Initialize tensors completed · ${(performance.now() - startInitTensors).toFixed(2)}ms`);
     } catch (e) {
@@ -424,6 +479,9 @@ async function loadModels(models) {
         return;
     }
     updateLoadWave(100.0);
+    modelsLoaded = true;
+    // Changing the resolution or the prompt mid-load leaves the sessions on the old settings.
+    updateRebuildHint();
     log("[Session Create] Ready to generate image");
     let imageArea = $$("#image_area>div");
     imageArea.forEach(i => {
@@ -654,6 +712,58 @@ async function initializeTensors() {
     }
 }
 
+// Stale models, in pipeline order so the progress bar advances monotonically.
+function modelsNeedingRebuild() {
+    const staleModels = new Set();
+    if (currentResolution !== resolution) {
+        resolutionDependentModels.forEach(modelName => staleModels.add(modelName));
+    }
+    if (pinsSequenceLength && currentSequenceLength !== sequenceLength) {
+        sequenceLengthDependentModels.forEach(modelName => staleModels.add(modelName));
+    }
+    // Also drops the safety checker models, which are deleted from `models` when it is off.
+    return Object.keys(models).filter(modelName => staleModels.has(modelName));
+}
+
+// State advances only on success, so a failed rebuild is retried on the next Generate.
+async function rebuildSessions(modelNames) {
+    const startTime = performance.now();
+    const targetResolution = resolution;
+    const targetSequenceLength = sequenceLength;
+    const target = pinsSequenceLength
+        ? `${targetResolution}x${targetResolution}, sequence length ${targetSequenceLength}`
+        : `${targetResolution}x${targetResolution}`;
+
+    log(`[Session Create] Rebuilding ${modelNames.length} model(s) for ${target}...`);
+    $("#img_div").setAttribute("class", "frame loadwave");
+    progressManager.beginRebuild(modelNames);
+
+    try {
+        disposeTensors();
+        updateModelDimensions(targetResolution, targetSequenceLength);
+
+        // Release before create: two live transformer sessions would take several GB.
+        for (const modelName of modelNames) {
+            const model = models[modelName];
+            if (model.session) {
+                await model.session.release();
+                model.session = undefined;
+            }
+            await createModelSession(modelName, model);
+        }
+
+        await initializeTensors();
+        currentResolution = targetResolution;
+        currentSequenceLength = targetSequenceLength;
+    } finally {
+        progressManager.endRebuild();
+    }
+
+    const elapsedTime = (performance.now() - startTime).toFixed(2);
+    log(`[Session Create] Rebuilt models for ${target} · ${elapsedTime}ms`);
+    updateRebuildHint();
+}
+
 // Screen whatever the VAE decoder last produced. sc_prep's input is bound to that output, so this
 // classifies the current frame — the final image or, during a preview, an intermediate step.
 async function checkNsfw(buffer) {
@@ -665,11 +775,11 @@ async function checkNsfw(buffer) {
 
 async function runModel(model) {
     if (useIOBinding) {
-        await WebNNPerf.time("webnn.inference", () => model.sess.run(model.feed, model.fetches), {
+        await WebNNPerf.time("webnn.inference", () => model.session.run(model.feed, model.fetches), {
             model: model.name || "unknown",
         });
     } else {
-        const results = await WebNNPerf.time("webnn.inference", () => model.sess.run(model.feed), {
+        const results = await WebNNPerf.time("webnn.inference", () => model.session.run(model.feed), {
             model: model.name || "unknown",
         });
         for (const [name, tensor] of Object.entries(results)) {
@@ -762,6 +872,24 @@ function resetStepStrip() {
     }
 }
 
+// Warn that the next Generate will rebuild sessions for the changed settings.
+function updateRebuildHint() {
+    const rebuildHint = $("#rebuild-hint");
+    const staleSettings = [];
+    if (currentResolution !== resolution) {
+        staleSettings.push(`${resolution}×${resolution}`);
+    }
+    if (pinsSequenceLength && currentSequenceLength !== sequenceLength) {
+        staleSettings.push(`${sequenceLength} tokens`);
+    }
+
+    const rebuildPending = modelsLoaded && staleSettings.length > 0;
+    if (rebuildPending) {
+        rebuildHint.textContent = `rebuilds models for ${staleSettings.join(" · ")}`;
+    }
+    rebuildHint.classList.toggle("hide", !rebuildPending);
+}
+
 // Lock the controls that feed a run in progress. Toggling "Steps preview" or the step count
 // mid-run would resize the latent ring under the loop, so they are locked alongside the rest.
 function setControlsDisabled(disabled) {
@@ -799,14 +927,20 @@ async function generateImage() {
 
         await loading;
 
-        if (currentResolution !== resolution) {
-            log(`[Session Run] Re-initializing tensors for resolution ${resolution}x${resolution}...`);
-            let initStart = performance.now();
-            disposeTensors();
-            updateModelDimensions(resolution);
-            await initializeTensors();
-            currentResolution = resolution;
-            log(`[Session Run] Re-initialized tensors in ${(performance.now() - initStart).toFixed(2)}ms`);
+        // Tokenize and rebuild before the timer starts; on WebNN the token count can force a rebuild.
+        const promptInputs = await getTextEncoderInputs(prompt.value, maxSequenceLength, sequencePadMultiple);
+        sequenceLength = promptInputs.sequenceLength;
+        console.log("Sequence Length:", sequenceLength);
+        if (sequenceLength > promptInputs.tokenCount) {
+            log(
+                `[Session Run] Prompt padded ${promptInputs.tokenCount} -> ${sequenceLength} tokens; ` +
+                    `the transformer has no attention mask, so this image differs from an unpadded run`,
+            );
+        }
+
+        const staleModels = modelsNeedingRebuild();
+        if (staleModels.length > 0) {
+            await rebuildSessions(staleModels);
         }
 
         $("#img_div").setAttribute("class", "frame inferncing");
@@ -815,11 +949,6 @@ async function generateImage() {
         let start = performance.now();
         const startTotal = start;
 
-        // Run Text Encoder
-        const promptInputs = await getTextEncoderInputs(prompt.value, maxSequenceLength);
-        sequenceLength = promptInputs.sequenceLength;
-
-        console.log("Sequence Length:", sequenceLength);
         // Text encoder I/O tensors are sized by the effective sequence length. Rebuild them only
         // when it changes; otherwise reuse the cached tensors to avoid per-run alloc/free churn.
         if (textEncoderSequenceLength !== sequenceLength) {
@@ -1135,7 +1264,7 @@ const updateDeviceTypeLinks = () => {
     let backendLinks = $("#backend-links");
     // Fix me: Once NPU is supported, uncomment the following line
     // const links = `· <a href="./?devicetype=gpu">GPU</a> · <a id="npu_link" href="./?devicetype=npu">NPU</a>`;
-    const links = `· <a href="./?devicetype=gpu">GPU</a>`;
+    const links = `· <a href="./?devicetype=gpu&provider=webnn">GPU</a>`;
     backendLinks.innerHTML = `${links}`;
 };
 
@@ -1259,6 +1388,8 @@ const ui = async () => {
             imgDiv.style.maxWidth = "100%";
             imgDiv.style.maxHeight = "100%";
         }
+        // Only flag it; the next Generate pays for the rebuild.
+        updateRebuildHint();
     });
 
     // Seed randomize button
@@ -1276,13 +1407,17 @@ const ui = async () => {
         prompt.value =
             "In a tranquil garden at dusk, a young Chinese woman stands gracefully in a red Hanfu with gold embroidery. Her flawless complexion features a red floral pattern on her forehead, enhancing her warm smile and expressive eyes. With her hair styled in a high bun adorned with a golden phoenix headdress, she holds a round folding fan decorated with nature scenes. Cherry blossom trees surround her, their petals drifting in the breeze, while a silhouetted pagoda (西安大雁塔) adds depth, blending tradition with modernity.";
     }
-    const promptInputs = await getTextEncoderInputs(prompt.value, maxSequenceLength);
-    $("#token-info").innerHTML = `${maxSequenceLength - promptInputs.sequenceLength}/${maxSequenceLength} tokens left`;
+    // The counter shows real tokens; padding does not consume the prompt budget.
+    const promptInputs = await getTextEncoderInputs(prompt.value, maxSequenceLength, sequencePadMultiple);
+    sequenceLength = promptInputs.sequenceLength;
+    $("#token-info").innerHTML = `${maxSequenceLength - promptInputs.tokenCount}/${maxSequenceLength} tokens left`;
 
     prompt.addEventListener("input", async () => {
-        const promptInputs = await getTextEncoderInputs(prompt.value, maxSequenceLength);
-        const leftTokenLength = maxSequenceLength - promptInputs.sequenceLength;
+        const promptInputs = await getTextEncoderInputs(prompt.value, maxSequenceLength, sequencePadMultiple);
+        sequenceLength = promptInputs.sequenceLength;
+        const leftTokenLength = maxSequenceLength - promptInputs.tokenCount;
         $("#token-info").innerHTML = `${leftTokenLength <= 0 ? 0 : leftTokenLength}/${maxSequenceLength} tokens left`;
+        updateRebuildHint();
     });
 
     generate.addEventListener("click", () => {
@@ -1322,19 +1457,21 @@ const ui = async () => {
         if (memoryReleaseSwitch.checked) {
             disposeTensors();
             const sessions = [
-                models["text_encoder"]?.sess,
-                models["transformer"]?.sess,
-                models["scheduler_step"]?.sess,
-                models["vae_pre_process"]?.sess,
-                models["vae_decoder"]?.sess,
-                models["sc_prep"]?.sess,
-                models["safety_checker"]?.sess,
+                models["text_encoder"]?.session,
+                models["transformer"]?.session,
+                models["scheduler_step"]?.session,
+                models["vae_pre_process"]?.session,
+                models["vae_decoder"]?.session,
+                models["sc_prep"]?.session,
+                models["safety_checker"]?.session,
             ];
 
             Promise.allSettled(sessions.filter(session => session).map(session => session?.release())).catch(error =>
                 console.error("Session release error:", error),
             );
 
+            modelsLoaded = false;
+            updateRebuildHint();
             load.disabled = false;
             buttons.setAttribute("class", "button-group key action-buttons");
             generate.disabled = true;
