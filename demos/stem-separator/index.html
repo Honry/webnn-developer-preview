@@ -247,12 +247,18 @@
         </div>
 
         <script type="module">
+            const isRemote = location.href.includes("github.io");
+            const remoteBaseUrl = "https://huggingface.co/lwanming/stem-separator/resolve/main/";
             const MODELS = {
                 htdemucs_fwd: {
                     label: "htdemucs_fwd (our export, Path A)",
-                    url: "./models/htdemucs_fwd/htdemucs_fwd.onnx",
+                    url: isRemote
+                        ? remoteBaseUrl + "htdemucs_fwd/htdemucs_fwd.onnx"
+                        : "./models/htdemucs_fwd/htdemucs_fwd.onnx",
                     opfsPath: "models/htdemucs_fwd/htdemucs_fwd.onnx",
-                    externalDataUrl: "./models/htdemucs_fwd/htdemucs_fwd.onnx.data",
+                    externalDataUrl: isRemote
+                        ? remoteBaseUrl + "htdemucs_fwd/htdemucs_fwd.onnx.data"
+                        : "./models/htdemucs_fwd/htdemucs_fwd.onnx.data",
                     externalDataOpfsPath: "models/htdemucs_fwd/htdemucs_fwd.onnx.data",
                     sizeMB: 170,
                     fwdOnly: true,
