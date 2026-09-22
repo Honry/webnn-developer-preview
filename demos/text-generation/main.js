@@ -188,6 +188,63 @@ const MODELS = {
         enable_thinking: false,
         system_content: "You are a helpful assistant.",
     },
+    qwen3128pipcse: {
+        // name: "Qwen3 4B Instruct block-128 with position ids + shared uint8 embedding",
+        name: "Qwen3 4B",
+        desc: "Alibaba Qwen3-4B-Instruct block size 128 with position ids + shared uint8 embedding",
+        id: "Qwen/Qwen3-4B-Instruct",
+        file_name: "model.onnx",
+        local_path: "models/Qwen/webnn-qwen3-4b-ov-perchannel/new/",
+        remote_path: "https://huggingface.co/lwanming/Qwen3-4B-onnx-ov/resolve/main/",
+        eos_token_id: [151645, 151643],
+        max_length: 40960,
+        num_layers: 36,
+        kv_num_heads: 8,
+        head_size: 128,
+        vocab_size: 151936,
+        has_position_ids: true,
+        enable_thinking: false,
+        system_content: "You are a helpful assistant.",
+        // system_content:
+        //     "You are a helpful assistant. Keep answers concise. Always format code blocks and key points using clean Markdown.",
+        // system_content:
+        // "You are a senior web architect and systems engineer expert in silicon-hardware acceleration. Provide precise, technical, and practical recommendations. Keep answers concise. Format with clean Markdown.",
+        // "You are a senior web architect expert in PC silicon-hardware acceleration. Provide precise, technical recommendations, supporting each point with a 2-to-3 sentence explanation focused strictly on laptops and AI PCs, while avoiding any mention of mobile, phone, or embedded systems. Format with clean Markdown.",
+    },
+    qwen3128pipcse1: {
+        name: "Qwen3 4B Instruct block-128 with position ids + shared uint8 embedding + enable_webgpu_graph false",
+        desc: "Alibaba Qwen3-4B-Instruct block size 128 with position ids + shared uint8 embedding + enable_webgpu_graph false (attention_mask + Shape)",
+        id: "Qwen/Qwen3-4B-Instruct",
+        file_name: "model.onnx",
+        local_path: "models/Qwen/webnn-qwen3-4b-ov-perchannel-1/",
+        remote_path: "https://huggingface.co/webnn/Qwen3-4B-Instruct-onnx/resolve/main/",
+        eos_token_id: [151645, 151643],
+        max_length: 40960,
+        num_layers: 36,
+        kv_num_heads: 8,
+        head_size: 128,
+        vocab_size: 151936,
+        has_position_ids: true,
+        enable_thinking: false,
+        system_content: "You are a helpful assistant.",
+    },
+    qwen3128pcse: {
+        name: "Qwen3 4B Instruct block-128 with no position ids + shared uint8 embedding + enable_webgpu_graph false",
+        desc: "Alibaba Qwen3-4B-Instruct block size 128 with no position ids + shared uint8 embedding + enable_webgpu_graph false (attention_mask + Shape)",
+        id: "Qwen/Qwen3-4B-Instruct",
+        file_name: "model.onnx",
+        local_path: "models/Qwen/webnn-qwen3-4b-ov-perchannel-2/",
+        remote_path: "https://huggingface.co/webnn/Qwen3-4B-Instruct-onnx/resolve/main/",
+        eos_token_id: [151645, 151643],
+        max_length: 40960,
+        num_layers: 36,
+        kv_num_heads: 8,
+        head_size: 128,
+        vocab_size: 151936,
+        has_position_ids: false,
+        enable_thinking: false,
+        system_content: "You are a helpful assistant.",
+    },
     qwen35: {
         name: "Qwen3.5 4B",
         desc: "Alibaba Qwen3.5-4B (hybrid linear+full attention)",
@@ -455,6 +512,7 @@ function getConfig() {
         max_length: 512,
         enable_causallm: 0,
         local: 0,
+        trace: 0,
     };
     let vars = query.split("&");
     let errorMessage = "";
@@ -648,32 +706,52 @@ async function Query(continuation, query, cb) {
     const timeToNewTokens = took - timeToFirstToken;
     const sequenceLength = outputTokens.length;
     const tps = (sequenceLength - 1) / timeToNewTokens;
-    const ipot = llm.inferenceTokenCount > 0 ? llm.inferenceTimeSum / llm.inferenceTokenCount : 0;
+    // Inter-token latency: the wall-clock reciprocal of TPOS, so IPOT * TPOS == 1 by construction.
+    const ipot = tps > 0 ? 1000 / tps : 0;
+    // Measured cost of one decode inference (session.run + logits read-back), excluding the JS work
+    // around it (feed setup, repetition penalty, sampling, KV cache swap, UI callback).
+    // Not surfaced in the UI yet — console only.
+    const avgInference =
+        llm.inferenceTokenCount > 0 ? (llm.sessionRunTimeSum + llm.inferenceTimeSum) / llm.inferenceTokenCount : 0;
     const avgSessionRun = llm.inferenceTokenCount > 0 ? llm.sessionRunTimeSum / llm.inferenceTokenCount : 0;
+    const avgReadBack = llm.inferenceTokenCount > 0 ? llm.inferenceTimeSum / llm.inferenceTokenCount : 0;
+    console.log(
+        `[perf] decode tokens: ${llm.inferenceTokenCount}, ` +
+            `inference: ${avgInference.toFixed(2)} ms/token ` +
+            `(session.run ${avgSessionRun.toFixed(2)} + read-back ${avgReadBack.toFixed(2)}), ` +
+            `IPOT: ${ipot.toFixed(2)} ms/token, overhead: ${(ipot - avgInference).toFixed(2)} ms/token`,
+    );
 
     log(`${sequenceLength} tokens in ${took.toFixed(2)} sec<br/>
     Time to first token: ${timeToFirstToken.toFixed(2)} sec<br/>
     New tokens per second: ${tps.toFixed(2)} tokens/sec<br/>
-    IPOT: ${ipot.toFixed(2)} ms/token<br/>
-    Avg session.run(): ${avgSessionRun.toFixed(2)} ms/token`);
+    IPOT: ${ipot.toFixed(2)} ms/token<br/>`);
 
     performanceIndicator.innerHTML =
         `<span class="perf-metric"><b>${sequenceLength}</b> tokens</span>` +
         `<span class="perf-metric">TTFT: <b>${timeToFirstToken.toFixed(2)}</b>s</span>` +
         `<span class="perf-metric">TPOS: <b>${tps.toFixed(2)}</b> tokens/s</span>` +
-        `<span class="perf-metric">IPOT: <b>${ipot.toFixed(2)}</b> ms/token</span>` +
-        `<span class="perf-metric">Avg session.run(): <b>${avgSessionRun.toFixed(2)}</b> ms/token</span>`;
+        `<span class="perf-metric">IPOT: <b>${ipot.toFixed(2)}</b> ms/token</span>`;
 }
 
 const main = async () => {
     await setupORT("text-generation", "dev");
-    showCompatibleChromiumVersion("text-generation");
+    // showCompatibleChromiumVersion("text-generation");
 
     ort.env.wasm.numThreads = 4;
     ort.env.wasm.simd = true;
     ort.env.wasm.proxy = false;
     ort.env.logLevel = "warning";
-    // ort.env.trace = true;
+    if (config.profiler === 1 && config.provider === "webgpu") {
+        // ort.env.trace = true;
+        ort.env.webgpu.profilingMode = "default";
+        ort.env.webgpu.profiling = {
+            mode: "default",
+            // ondata: data => {
+            //     console.log("WebGPU profiling data:", data);
+            // },
+        };
+    }
 
     log(`ONNX Runtime Web Execution Provider loaded · ${provider.toLowerCase()}`);
 

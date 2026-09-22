@@ -94,6 +94,7 @@ export class LLM {
         this.kvNumHeads = model.kv_num_heads;
         this.headSize = model.head_size;
         this.enableCausalLM = !!options.enable_causallm;
+        this.profiler = !!options.profiler;
         this.kvDims = this.enableCausalLM
             ? [1, model.kv_num_heads, 1, model.head_size]
             : [1, model.kv_num_heads, this.maxLength, model.head_size];
@@ -163,11 +164,6 @@ export class LLM {
                     deviceType: this.deviceType,
                     context: this.mlContext,
                     enableCausalLM: this.enableCausalLM,
-                    freeDimensionBounds: {
-                        sequence_length: { maxSize: this.maxLength },
-                        ...(this.enableCausalLM && { past_sequence_length: { maxSize: this.maxLength } }),
-                        total_sequence_length: { maxSize: this.maxLength },
-                    },
                 },
             ],
             externalData: externalData,
@@ -199,9 +195,13 @@ export class LLM {
         }
 
         let progressBarLabel = $("#p-bar-label");
-        log("Create session for prefill process");
+        // log("Create session for prefill process");
         console.log("Create session with option: ");
         console.log({ ...sessionOptions });
+        if (this.profiler && this.provider == "webgpu") {
+            console.log("[check] webgpu.profiling =", ort.env.webgpu.profiling);
+            sessionOptions.enableProfiling = true;
+        }
         this.session = await WebNNPerf.time(
             "webnn.session.create",
             () => ort.InferenceSession.create(modelArrayBuffer, sessionOptions),
@@ -806,7 +806,8 @@ export class LLM {
             this.inferenceTokenCount++;
         } else {
             outputs = await this.session.run(this.feed, this.fetches);
-            this.inferenceTimeSum += performance.now() - startRun;
+            this.sessionRunTimeSum += performance.now() - startRun;
+            // Logits are already in CPU memory here, so there is no separate read-back step to time.
             this.inferenceTokenCount++;
             this.logitsBuffer = outputs["logits"].cpuData;
         }
@@ -815,8 +816,8 @@ export class LLM {
 
     async _doGenerate(inputIds, callback) {
         this.outputTokens = [];
-        this.inferenceTimeSum = 0; // Total inference time for decode tokens (ms)
         this.sessionRunTimeSum = 0; // Total session.run() time for decode tokens (ms)
+        this.inferenceTimeSum = 0; // Total logits read-back time for decode tokens (ms); 0 when logits are already on CPU
         this.inferenceTokenCount = 0; // Number of decode tokens timed
         const inputIdsLen = inputIds.length;
         const attnMaskLen = this.startLength + inputIdsLen;
@@ -935,7 +936,9 @@ export class LLM {
             this.updateKvCache(outputs);
             this.startLength++;
         }
-
+        if (this.provider == "webgpu" && this.profiler) {
+            await this.session.endProfiling();
+        }
         return this.outputTokens;
     }
 

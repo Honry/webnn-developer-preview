@@ -3,7 +3,7 @@
 }
 
 .message-element {
-    text-align: right;
+    text-align: left;
 }
 
 .user-message {
@@ -11,7 +11,7 @@
     border-radius: 1.5rem;
     background-color: var(--black-05);
     display: inline-flex;
-    margin: 0 1rem;
+    margin: 0;
 }
 
 .response-message {

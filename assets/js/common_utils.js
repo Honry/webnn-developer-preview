@@ -273,7 +273,7 @@ const loadScriptWithMessage = async version => {
             return "ONNX Runtime Web: Test version";
         } else if (version === "test-sym-no-zp-0806") {
             // Test int4 + no-zp
-            await loadScript("onnxruntime-web", "../../assets/dist-dynamic-dim-poc-llm-8086/ort.jspi.min.js");
+            await loadScript("onnxruntime-web", "../../assets/dist-dynamic-dim-poc-llm-8086/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
         } else if (version === "test-sym-no-zp-0901-cast-rms") {
             // Test int4 + no-zp
