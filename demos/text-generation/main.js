@@ -192,7 +192,7 @@ const MODELS = {
         // name: "Qwen3 4B Instruct block-128 with position ids + shared uint8 embedding",
         name: "Qwen3 4B",
         desc: "Alibaba Qwen3-4B-Instruct block size 128 with position ids + shared uint8 embedding",
-        id: "Qwen/Qwen3-4B-Instruct",
+        id: "Qwen/Qwen3-4B",
         file_name: "model.onnx",
         local_path: "models/Qwen/webnn-qwen3-4b-ov-perchannel/new/",
         remote_path: "https://huggingface.co/lwanming/Qwen3-4B-onnx-ov/resolve/main/",
