@@ -195,7 +195,7 @@ const MODELS = {
         id: "Qwen/Qwen3-4B",
         file_name: "model.onnx",
         local_path: "models/Qwen/webnn-qwen3-4b-ov-perchannel/new/",
-        remote_path: "https://huggingface.co/lwanming/Qwen3-4B-onnx-ov/resolve/main/",
+        remote_path: "https://huggingface.co/lwanming/Qwen3-4B-onnx-ov/resolve/main/onnx/",
         eos_token_id: [151645, 151643],
         max_length: 40960,
         num_layers: 36,
