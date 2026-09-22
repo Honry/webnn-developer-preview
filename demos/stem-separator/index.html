@@ -132,6 +132,53 @@
                 font-size: 11px;
                 font-weight: 600;
             }
+            .mixer-transport {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 12px;
+            }
+            #mixer-clock {
+                font-family: "Consolas", "Monaco", monospace;
+                font-size: 13px;
+                color: #555;
+                min-width: 92px;
+            }
+            .mixer-hint {
+                font-size: 12px;
+                color: #888;
+            }
+            .stem-toggles {
+                display: flex;
+                gap: 8px;
+                margin-bottom: 8px;
+            }
+            .stem-toggle {
+                flex: 1;
+                padding: 6px 0;
+                font-size: 12px;
+                letter-spacing: 0.5px;
+                background: #eceff1;
+                color: #546e7a;
+            }
+            .stem-toggle:hover {
+                background: #dfe4e7;
+            }
+            .stem-toggle.active {
+                background: #37474f;
+                color: white;
+            }
+            .stem-toggle.active:hover {
+                background: #263238;
+            }
+            .stem-toggle.solo.active {
+                background: #f5a623;
+                color: #3a2a00;
+            }
+            .stem-toggle.solo.active:hover {
+                background: #e09612;
+            }
         </style>
     </head>
     <body>
@@ -232,6 +279,12 @@
                 <br /><em id="results-gate-msg">Your stems will appear here after separation.</em>
             </div>
             <div id="results-controls" style="display: none; margin-bottom: 15px">
+                <div class="mixer-transport">
+                    <button id="mixer-play-btn">▶ Play</button>
+                    <button id="mixer-stop-btn">⏮ Start</button>
+                    <span id="mixer-clock">0:00 / 0:00</span>
+                    <span class="mixer-hint">All four stems play in sync — use M to mute, S to solo.</span>
+                </div>
                 <button id="download-all-btn">Download all stems (.wav)</button>
             </div>
             <div id="stem-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px"></div>
@@ -998,6 +1051,12 @@
             async function handleAudioFile(file) {
                 const infoEl = document.getElementById("audio-info");
                 infoEl.innerHTML = "<em>Decoding...</em>";
+                // Stems from the previous file are stale: stop the mixer and clear them
+                // so nothing keeps playing under the newly loaded track.
+                resetStemMixer();
+                document.getElementById("stem-grid").innerHTML = "";
+                document.getElementById("results-controls").style.display = "none";
+                document.getElementById("results-gate-msg").style.display = "";
                 log("");
                 log(`=== AUDIO INGEST: ${file.name} (${(file.size / 1048576).toFixed(2)} MB) ===`);
                 const decoded = await decodeAudioFile(file);
@@ -1745,14 +1804,6 @@
                 vocals: "#27ae60",
             };
 
-            const stemObjectUrls = [];
-
-            function clearStemObjectUrls() {
-                while (stemObjectUrls.length > 0) {
-                    URL.revokeObjectURL(stemObjectUrls.pop());
-                }
-            }
-
             function stripExtension(filename) {
                 const dot = filename.lastIndexOf(".");
                 return dot > 0 ? filename.substring(0, dot) : filename;
@@ -1769,19 +1820,18 @@
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
             }
 
-            function drawWaveform(canvas, left, right, audio, state) {
-                const context = canvas.getContext("2d");
-                const width = canvas.clientWidth;
-                const height = canvas.clientHeight;
-                const pixelRatio = window.devicePixelRatio || 1;
-                canvas.width = Math.max(1, Math.floor(width * pixelRatio));
-                canvas.height = Math.max(1, Math.floor(height * pixelRatio));
+            // The peak scan is O(total samples), so it is rendered once into an
+            // offscreen layer and only re-run on resize. With four stems animating
+            // in sync a per-frame rescan would be ~10M samples x 4 x 60fps.
+            function buildWaveformLayer(width, height, pixelRatio, left, right, color) {
+                const layer = document.createElement("canvas");
+                layer.width = Math.max(1, Math.floor(width * pixelRatio));
+                layer.height = Math.max(1, Math.floor(height * pixelRatio));
+                const context = layer.getContext("2d");
                 context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-                context.clearRect(0, 0, width, height);
 
                 const middle = height / 2;
                 const peakHeight = height * 0.42;
-                const color = canvas.dataset.color;
                 context.fillStyle = "#f5f5f5";
                 context.fillRect(0, 0, width, height);
                 context.strokeStyle = "#d9d9d9";
@@ -1810,59 +1860,354 @@
                 }
                 context.stroke();
                 context.globalAlpha = 1;
+                return layer;
+            }
 
-                if (audio.duration) {
-                    const playheadX = Math.min(width, (audio.currentTime / audio.duration) * width);
+            // `clock` is any object exposing the HTMLAudioElement subset we need:
+            // duration, paused, a get/set currentTime, and addEventListener for
+            // play/pause/ended. Both <audio> and the stem mixer transport qualify.
+            function drawWaveform(canvas, left, right, clock, state) {
+                state.draw = () => drawWaveform(canvas, left, right, clock, state);
+                const width = canvas.clientWidth;
+                const height = canvas.clientHeight;
+                if (width < 1 || height < 1) return;
+                const pixelRatio = window.devicePixelRatio || 1;
+                const layerKey = `${width}x${height}x${pixelRatio}`;
+                if (state.layerKey !== layerKey) {
+                    state.layer = buildWaveformLayer(width, height, pixelRatio, left, right, canvas.dataset.color);
+                    state.layerKey = layerKey;
+                }
+
+                const context = canvas.getContext("2d");
+                if (canvas.width !== state.layer.width || canvas.height !== state.layer.height) {
+                    canvas.width = state.layer.width;
+                    canvas.height = state.layer.height;
+                }
+                context.setTransform(1, 0, 0, 1, 0, 0);
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.globalAlpha = canvas.dataset.dimmed === "1" ? 0.25 : 1;
+                context.drawImage(state.layer, 0, 0);
+                context.globalAlpha = 1;
+
+                context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+                if (clock.duration) {
+                    const playheadX = Math.min(width, (clock.currentTime / clock.duration) * width);
                     context.fillStyle = "#333";
                     context.fillRect(Math.max(0, playheadX - 1), 0, 2, height);
                 }
-                state.draw = () => drawWaveform(canvas, left, right, audio, state);
             }
 
-            function setupWaveform(canvas, left, right, audio, color = "#3f6f9f") {
+            function setupWaveform(canvas, left, right, clock, color = "#3f6f9f") {
                 canvas.dataset.color = color;
-                const state = { draw: null, animationFrame: null };
+                const state = { draw: null, animationFrame: null, layer: null, layerKey: "" };
                 const resizeObserver = new ResizeObserver(() => state.draw());
                 resizeObserver.observe(canvas);
-                state.draw = () => drawWaveform(canvas, left, right, audio, state);
+                state.draw = () => drawWaveform(canvas, left, right, clock, state);
 
                 canvas.addEventListener("click", event => {
-                    if (!audio.duration) return;
+                    if (!clock.duration) return;
                     const bounds = canvas.getBoundingClientRect();
-                    audio.currentTime =
-                        Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) * audio.duration;
+                    clock.currentTime =
+                        Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) * clock.duration;
                     state.draw();
                 });
                 canvas.addEventListener("pointermove", event => {
-                    canvas.title = audio.duration
-                        ? `${(((event.clientX - canvas.getBoundingClientRect().left) / canvas.clientWidth) * audio.duration).toFixed(1)}s`
+                    canvas.title = clock.duration
+                        ? `${(((event.clientX - canvas.getBoundingClientRect().left) / canvas.clientWidth) * clock.duration).toFixed(1)}s`
                         : "Waveform";
                 });
-                audio.addEventListener("play", () => {
+                clock.addEventListener("play", () => {
                     const animate = () => {
                         state.draw();
-                        if (!audio.paused) state.animationFrame = requestAnimationFrame(animate);
+                        if (!clock.paused) state.animationFrame = requestAnimationFrame(animate);
                     };
                     cancelAnimationFrame(state.animationFrame);
                     animate();
                 });
-                audio.addEventListener("pause", () => {
+                clock.addEventListener("pause", () => {
                     cancelAnimationFrame(state.animationFrame);
                     state.draw();
                 });
-                audio.addEventListener("ended", () => {
+                clock.addEventListener("ended", () => {
                     cancelAnimationFrame(state.animationFrame);
                     state.draw();
                 });
                 state.draw();
+                return state;
+            }
+
+            // ============================================================================
+            // Stem mixer: one AudioContext drives all four stems from a single clock,
+            // so they stay sample-accurate. Each stem gets a persistent GainNode, and
+            // mute/solo is expressed purely as gain, never by stopping a source.
+            // ============================================================================
+
+            const GAIN_RAMP_SECONDS = 0.01;
+            const START_LEAD_SECONDS = 0.02;
+
+            const stemMixer = {
+                context: null,
+                pcm: null, // name -> { left, right }, kept so buffers can be built on first play
+                buffers: {},
+                gains: {},
+                sources: {},
+                muted: new Set(),
+                solo: new Set(),
+                tiles: {}, // name -> { muteBtn, soloBtn, canvas, redraw }
+                listeners: { play: [], pause: [], ended: [] },
+                sampleRate: TARGET_SAMPLE_RATE,
+                duration: 0,
+                playing: false,
+                startedAt: 0, // context clock reading when the current run began
+                startOffset: 0, // track position at that instant
+                clockFrame: null,
+            };
+
+            // Duck-types the slice of HTMLAudioElement that setupWaveform consumes.
+            const stemTransport = {
+                get duration() {
+                    return stemMixer.duration;
+                },
+                get paused() {
+                    return !stemMixer.playing;
+                },
+                get currentTime() {
+                    return mixerPosition();
+                },
+                set currentTime(value) {
+                    mixerSeek(value);
+                },
+                addEventListener(type, callback) {
+                    if (stemMixer.listeners[type]) stemMixer.listeners[type].push(callback);
+                },
+            };
+
+            function mixerEmit(type) {
+                for (const callback of stemMixer.listeners[type] || []) callback();
+            }
+
+            function mixerPosition() {
+                if (!stemMixer.playing || !stemMixer.context) return stemMixer.startOffset;
+                const elapsed = Math.max(0, stemMixer.context.currentTime - stemMixer.startedAt);
+                return Math.min(stemMixer.startOffset + elapsed, stemMixer.duration);
+            }
+
+            function effectiveStemGain(name) {
+                // Solo overrides mute while active, but never clears it: dropping the
+                // last solo falls straight back to whatever was muted before.
+                const audible = stemMixer.solo.size > 0 ? stemMixer.solo.has(name) : !stemMixer.muted.has(name);
+                return audible ? 1 : 0;
+            }
+
+            function applyStemGains() {
+                const context = stemMixer.context;
+                for (const name of STEM_NAMES) {
+                    const gain = stemMixer.gains[name];
+                    if (!gain || !context) continue;
+                    // A step change on a running signal clicks; ramp instead.
+                    const now = context.currentTime;
+                    gain.gain.cancelScheduledValues(now);
+                    gain.gain.setValueAtTime(gain.gain.value, now);
+                    gain.gain.linearRampToValueAtTime(effectiveStemGain(name), now + GAIN_RAMP_SECONDS);
+                }
+                updateStemTileStates();
+            }
+
+            function updateStemTileStates() {
+                for (const name of STEM_NAMES) {
+                    const tile = stemMixer.tiles[name];
+                    if (!tile) continue;
+                    const isMuted = stemMixer.muted.has(name);
+                    const isSolo = stemMixer.solo.has(name);
+                    tile.muteBtn.classList.toggle("active", isMuted);
+                    tile.soloBtn.classList.toggle("active", isSolo);
+                    tile.muteBtn.setAttribute("aria-pressed", String(isMuted));
+                    tile.soloBtn.setAttribute("aria-pressed", String(isSolo));
+                    tile.canvas.dataset.dimmed = effectiveStemGain(name) > 0 ? "" : "1";
+                    tile.redraw();
+                }
+            }
+
+            function toggleStemMute(name) {
+                if (stemMixer.muted.has(name)) stemMixer.muted.delete(name);
+                else stemMixer.muted.add(name);
+                applyStemGains();
+            }
+
+            function toggleStemSolo(name) {
+                if (stemMixer.solo.has(name)) stemMixer.solo.delete(name);
+                else stemMixer.solo.add(name);
+                applyStemGains();
+            }
+
+            function ensureMixerContext() {
+                if (stemMixer.context) return stemMixer.context;
+                const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+                const context = new AudioContextCtor({ sampleRate: stemMixer.sampleRate });
+                stemMixer.context = context;
+                for (const name of STEM_NAMES) {
+                    const stem = stemMixer.pcm[name];
+                    const buffer = context.createBuffer(2, stem.left.length, stemMixer.sampleRate);
+                    buffer.copyToChannel(stem.left, 0);
+                    buffer.copyToChannel(stem.right, 1);
+                    stemMixer.buffers[name] = buffer;
+                    const gain = context.createGain();
+                    gain.gain.value = effectiveStemGain(name);
+                    gain.connect(context.destination);
+                    stemMixer.gains[name] = gain;
+                }
+                return context;
+            }
+
+            function mixerStopSources() {
+                for (const name of STEM_NAMES) {
+                    const source = stemMixer.sources[name];
+                    if (!source) continue;
+                    source.onended = null; // our own stop() must not look like end-of-track
+                    try {
+                        source.stop();
+                    } catch {
+                        // never started
+                    }
+                    source.disconnect();
+                }
+                stemMixer.sources = {};
+            }
+
+            function startTransportClock() {
+                const tick = () => {
+                    updateTransportUi();
+                    if (stemMixer.playing) stemMixer.clockFrame = requestAnimationFrame(tick);
+                };
+                cancelAnimationFrame(stemMixer.clockFrame);
+                tick();
+            }
+
+            async function mixerPlay() {
+                if (stemMixer.playing || !stemMixer.pcm) return;
+                const context = ensureMixerContext();
+                if (context.state === "suspended") await context.resume();
+                let offset = stemMixer.startOffset;
+                if (offset >= stemMixer.duration - 0.01) offset = 0;
+                // One shared start instant is what keeps the four stems locked together.
+                const startTime = context.currentTime + START_LEAD_SECONDS;
+                for (const name of STEM_NAMES) {
+                    const source = context.createBufferSource();
+                    source.buffer = stemMixer.buffers[name];
+                    source.connect(stemMixer.gains[name]);
+                    source.start(startTime, offset);
+                    stemMixer.sources[name] = source;
+                }
+                stemMixer.sources[STEM_NAMES[0]].onended = () => mixerHandleEnded();
+                stemMixer.startedAt = startTime;
+                stemMixer.startOffset = offset;
+                stemMixer.playing = true;
+                startTransportClock();
+                mixerEmit("play");
+            }
+
+            function mixerPause() {
+                if (!stemMixer.playing) return;
+                const position = mixerPosition();
+                mixerStopSources();
+                stemMixer.playing = false;
+                stemMixer.startOffset = position;
+                updateTransportUi();
+                mixerEmit("pause");
+            }
+
+            function mixerHandleEnded() {
+                mixerStopSources();
+                stemMixer.playing = false;
+                stemMixer.startOffset = 0;
+                updateTransportUi();
+                mixerEmit("ended");
+            }
+
+            function mixerSeek(seconds) {
+                const target = Math.max(0, Math.min(seconds, stemMixer.duration));
+                const wasPlaying = stemMixer.playing;
+                if (wasPlaying) mixerStopSources();
+                stemMixer.playing = false;
+                stemMixer.startOffset = target;
+                if (wasPlaying) mixerPlay();
+                else updateTransportUi();
+            }
+
+            function formatClock(seconds) {
+                const total = Math.max(0, Math.floor(seconds));
+                return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+            }
+
+            function updateTransportUi() {
+                const playBtn = document.getElementById("mixer-play-btn");
+                const clock = document.getElementById("mixer-clock");
+                if (playBtn) playBtn.textContent = stemMixer.playing ? "⏸ Pause" : "▶ Play";
+                if (clock) clock.textContent = `${formatClock(mixerPosition())} / ${formatClock(stemMixer.duration)}`;
+            }
+
+            // Called before every render so repeated separations do not leak buffers
+            // (four stereo buffers is ~40 MB for a four-minute track) or stack up
+            // waveform listeners from the previous run.
+            async function resetStemMixer() {
+                mixerStopSources();
+                cancelAnimationFrame(stemMixer.clockFrame);
+                const context = stemMixer.context;
+                stemMixer.context = null;
+                stemMixer.pcm = null;
+                stemMixer.buffers = {};
+                stemMixer.gains = {};
+                stemMixer.tiles = {};
+                stemMixer.muted.clear();
+                stemMixer.solo.clear();
+                stemMixer.listeners = { play: [], pause: [], ended: [] };
+                stemMixer.duration = 0;
+                stemMixer.playing = false;
+                stemMixer.startedAt = 0;
+                stemMixer.startOffset = 0;
+                stemMixer.clockFrame = null;
+                updateTransportUi();
+                if (context && context.state !== "closed") {
+                    try {
+                        await context.close();
+                    } catch {
+                        // already closing
+                    }
+                }
+            }
+
+            function bindTransportControls() {
+                const playBtn = document.getElementById("mixer-play-btn");
+                const stopBtn = document.getElementById("mixer-stop-btn");
+                playBtn.onclick = () => {
+                    if (stemMixer.playing) mixerPause();
+                    else mixerPlay();
+                };
+                stopBtn.onclick = () => {
+                    if (stemMixer.playing) {
+                        mixerSeek(0);
+                    } else {
+                        stemMixer.startOffset = 0;
+                        updateTransportUi();
+                        mixerEmit("pause"); // redraw the playheads at zero
+                    }
+                };
             }
 
             function renderStemResults(stems, sourceFilename) {
-                clearStemObjectUrls();
+                resetStemMixer();
                 const grid = document.getElementById("stem-grid");
                 grid.innerHTML = "";
                 const baseName = stripExtension(sourceFilename || "audio");
                 const blobs = {};
+
+                stemMixer.sampleRate = stems.sampleRate;
+                stemMixer.pcm = {};
+                for (const name of STEM_NAMES) {
+                    stemMixer.pcm[name] = { left: stems[name].left, right: stems[name].right };
+                }
+                stemMixer.duration = stems[STEM_NAMES[0]].left.length / stems.sampleRate;
+
                 log("");
                 log("=== ENCODING WAV FILES ===");
                 for (const name of STEM_NAMES) {
@@ -1871,8 +2216,6 @@
                     const blob = encodeWavFloat32(stem.left, stem.right, stems.sampleRate);
                     const encMs = performance.now() - tEnc;
                     blobs[name] = blob;
-                    const url = URL.createObjectURL(blob);
-                    stemObjectUrls.push(url);
                     log(`  ${name}: ${(blob.size / 1048576).toFixed(1)} MB encoded in ${encMs.toFixed(0)}ms`);
                     const tile = document.createElement("div");
                     tile.style.cssText =
@@ -1883,17 +2226,31 @@
             <div style="font-size: 11px; color: #888; font-family: 'Consolas', monospace;">${(blob.size / 1048576).toFixed(1)} MB</div>
           </div>
           <canvas class="stem-waveform" data-color="${STEM_COLORS[name]}" aria-label="${name} waveform" style="display: block; width: 100%; height: 96px; margin-bottom: 8px; border: 1px solid #e0e0e0; cursor: pointer;"></canvas>
-          <audio controls preload="metadata" style="width: 100%; margin-bottom: 8px;" src="${url}"></audio>
+          <div class="stem-toggles">
+            <button class="stem-toggle mute" data-stem="${name}" aria-pressed="false" title="Mute ${name}">M</button>
+            <button class="stem-toggle solo" data-stem="${name}" aria-pressed="false" title="Solo ${name}">S</button>
+          </div>
           <button class="stem-download-btn" data-stem="${name}" style="width: 100%;">Download ${baseName}.${name}.wav</button>
         `;
                     grid.appendChild(tile);
-                    setupWaveform(
-                        tile.querySelector(".stem-waveform"),
+                    const canvas = tile.querySelector(".stem-waveform");
+                    const waveformState = setupWaveform(
+                        canvas,
                         stem.left,
                         stem.right,
-                        tile.querySelector("audio"),
+                        stemTransport,
                         STEM_COLORS[name],
                     );
+                    const muteBtn = tile.querySelector(".stem-toggle.mute");
+                    const soloBtn = tile.querySelector(".stem-toggle.solo");
+                    muteBtn.addEventListener("click", () => toggleStemMute(name));
+                    soloBtn.addEventListener("click", () => toggleStemSolo(name));
+                    stemMixer.tiles[name] = {
+                        muteBtn,
+                        soloBtn,
+                        canvas,
+                        redraw: () => waveformState.draw(),
+                    };
                 }
                 for (const btn of grid.querySelectorAll(".stem-download-btn")) {
                     btn.addEventListener("click", () => {
@@ -1910,6 +2267,9 @@
                 };
                 document.getElementById("results-gate-msg").style.display = "none";
                 document.getElementById("results-controls").style.display = "block";
+                bindTransportControls();
+                updateTransportUi();
+                updateStemTileStates();
                 window.__htdemucsStemBlobs = blobs;
                 log(`✓ Stem audio is ready.`);
             }
