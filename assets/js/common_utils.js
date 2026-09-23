@@ -195,8 +195,8 @@ export async function remapHuggingFaceDomainIfNeeded(envOrObj, property = "remot
     return `https://huggingface.co`;
 }
 
-const DEV_ORT_VERSION = "1.24.0-dev.20251104-75d35474d5";
-const STABLE_ORT_VERSION = "";
+const DEV_ORT_VERSION = "1.31.0-dev.20260918-bc8e7ed75";
+const STABLE_ORT_VERSION = "1.29.0";
 const TEST_ORT_VERSION = "test";
 
 const KNOWN_COMPATIBLE_ORT_VERSION = {
@@ -255,8 +255,22 @@ const getLatestOrtWebDevVersion = async () => {
     }
 };
 
+// Matches a custom ORT Web URL, e.g. ?ort=https://localhost:8080/dist/ort.jspi.js
+const isOrtUrl = value => /^https?:\/\//i.test(value ?? "");
+
 const loadScriptWithMessage = async version => {
     try {
+        // Allow loading ORT Web from a custom URL, e.g. a locally deployed build.
+        // Cross-origin note: the host serving this script must send CORS headers
+        // (Access-Control-Allow-Origin), because loadScript sets crossOrigin="anonymous"
+        // and ORT fetches its sibling .wasm/.mjs files (resolved relative to this URL)
+        // cross-origin as well. An https page can only load https URLs (http://localhost
+        // is treated as secure; other http URLs are blocked as mixed content).
+        if (isOrtUrl(version)) {
+            await loadScript("onnxruntime-web", version);
+            return `ONNX Runtime Web: <a href="${version}">custom build</a>`;
+        }
+
         if (version === "test") {
             await loadScript("onnxruntime-web", "../../assets/dist/ort.webgpu.min.js");
             return "ONNX Runtime Web: Test version";
@@ -283,7 +297,7 @@ const loadScriptWithMessage = async version => {
             if (version === "latest") {
                 version = await getLatestOrtWebDevVersion();
             }
-            await loadScript("onnxruntime-web", `${ORT_CDN_URL}${version}/dist/ort.webgpu.min.js`);
+            await loadScript("onnxruntime-web", `${ORT_CDN_URL}${version}/dist/ort.jspi.min.js`);
             return `ONNX Runtime Web: <a href="${ortLink(version)}">${version}</a>`;
         }
     } catch (error) {
@@ -296,7 +310,9 @@ export const setupORT = async (key, branch) => {
     const version = KNOWN_COMPATIBLE_ORT_VERSION[key][branch];
     const ortVersionElement = $("#ortversion");
     removeElement("onnxruntime-web");
-    const queryOrt = getQueryValue("ort")?.toLowerCase();
+    const rawQueryOrt = getQueryValue("ort");
+    // Preserve case for custom URLs (paths are case-sensitive); lowercase keywords only.
+    const queryOrt = isOrtUrl(rawQueryOrt) ? rawQueryOrt : rawQueryOrt?.toLowerCase();
     let versionHtml;
     if (queryOrt) {
         versionHtml = await loadScriptWithMessage(queryOrt);
