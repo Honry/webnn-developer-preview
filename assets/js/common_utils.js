@@ -301,6 +301,9 @@ const loadScriptWithMessage = async version => {
         } else if (version === "matmulnbits-dp4a") {
             await loadScript("onnxruntime-web", "../../assets/dist-webgpu-matmulnbits-dp4a/ort.jspi.min.js");
             return `ONNX Runtime Web: Test version`;
+        } else if (version === "matmulnbits-subgroup-matrix") {
+            await loadScript("onnxruntime-web", "../../assets/dist-webgpu-matmulnbits-dp4a/ort.jspi.min.js");
+            return `ONNX Runtime Web: Test version`;
         } else if (version === "matmulnbits-f16") {
             await loadScript("onnxruntime-web", "../../assets/dist-webgpu-matmulnbits-f16/ort.jspi.min.js");
             return `ONNX Runtime Web: Test version`;
