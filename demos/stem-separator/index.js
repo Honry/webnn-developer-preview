@@ -1,5 +1,5 @@
 /* eslint-disable no-undef, no-unused-vars, no-empty */
-import { $, setupORT, showCompatibleChromiumVersion, getWebnnStatus } from "../../assets/js/common_utils.js";
+import { $, log, setupORT, showCompatibleChromiumVersion, getWebnnStatus } from "../../assets/js/common_utils.js";
 
 const HF_MODEL_BASE = "https://huggingface.co/webnn/stem-separator/resolve/main/onnx";
 const isRemote = location.href.includes("github.io");
@@ -35,14 +35,11 @@ function updateBackendBadge(backend) {
 
 const statusEl = document.getElementById("status");
 const loadBtn = document.getElementById("load-btn");
-const progressContainer = document.getElementById("progress-container");
-const progressFill = document.getElementById("progress-fill");
-const progressLabel = document.getElementById("progress-label");
+const loadwaveEl = document.getElementById("stage-loadwave");
 const inferenceControlState = new Map();
 
 function setInferenceControlsDisabled(disabled) {
     const controls = [
-        document.getElementById("model-select"),
         document.getElementById("backend-select"),
         document.getElementById("load-btn"),
         document.getElementById("audio-file"),
@@ -62,18 +59,23 @@ function setInferenceControlsDisabled(disabled) {
     inferenceControlState.clear();
 }
 
-function log(message) {
-    console.log(message);
+// Overall model-load progress, 0-100, drawn as the sdxl-turbo style loadwave over the Tracks stage.
+function setLoadProgress(value, label) {
+    loadwaveEl.hidden = false;
+    // Over existing tracks the overlay turns translucent, so it is clear the results are still there.
+    loadwaveEl.classList.toggle("over-tracks", !document.getElementById("mix-track").hidden);
+    loadwaveEl.style.setProperty("--loadwave-value", value);
+    document.getElementById("loadwave-value").textContent = Math.round(value);
+    if (label !== undefined) document.getElementById("loadwave-label").textContent = label;
 }
 
-function setProgress(percent, label) {
-    progressContainer.style.display = "block";
-    progressFill.style.width = `${percent}%`;
-    progressLabel.textContent = label || `${Math.round(percent)}%`;
+function hideLoadProgress() {
+    loadwaveEl.hidden = true;
 }
 
-function hideProgress() {
-    progressContainer.style.display = "none";
+function showStageMessage(text) {
+    document.getElementById("stage-msg").textContent = text;
+    document.getElementById("stage-empty").hidden = false;
 }
 
 // ============================================================================
@@ -127,7 +129,7 @@ async function loadOrt() {
     await setupORT("stem-separator", "dev");
     window.ort.env.wasm.numThreads = 1;
     window.ort.env.wasm.simd = true;
-    log("✓ ONNX Runtime Web loaded (webgpu build)");
+    log("✓ ONNX Runtime Web loaded");
 }
 
 async function updateWebnnStatus() {
@@ -148,7 +150,7 @@ async function updateWebnnStatus() {
 // Download model with progress
 // ============================================================================
 
-async function downloadWithProgress(url) {
+async function downloadWithProgress(url, onProgress) {
     log(`Downloading from ${url}...`);
     const response = await fetch(url);
     if (!response.ok) {
@@ -166,10 +168,7 @@ async function downloadWithProgress(url) {
         if (done) break;
         chunks.push(value);
         received += value.length;
-        if (total) {
-            const pct = (received / total) * 100;
-            setProgress(pct, `${(received / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`);
-        }
+        if (total) onProgress(received, total);
     }
 
     const buffer = new Uint8Array(received);
@@ -183,15 +182,24 @@ async function downloadWithProgress(url) {
     return buffer.buffer;
 }
 
-async function loadOneFile(label, opfsPath, url) {
+// `range` is the [from, to] slice of the overall load progress this file fills.
+async function loadOneFile(label, opfsPath, url, shortLabel, range) {
+    const [from, to] = range;
     log(`Checking OPFS cache for ${label}...`);
     let buffer = await readFromOPFS(opfsPath);
     if (buffer) {
         log(`✓ ${label} loaded from cache (${(buffer.byteLength / 1048576).toFixed(1)} MB)`);
+        setLoadProgress(to, `Loaded ${shortLabel} from cache`);
         return buffer;
     }
     log(`Cache miss for ${label}, fetching from disk...`);
-    buffer = await downloadWithProgress(url);
+    buffer = await downloadWithProgress(url, (received, total) => {
+        setLoadProgress(
+            from + ((to - from) * received) / total,
+            `Downloading ${shortLabel} · ${(received / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`,
+        );
+    });
+    setLoadProgress(to);
     log(`Caching ${label} to OPFS...`);
     const cached = await writeToOPFS(opfsPath, buffer);
     if (cached) log(`✓ ${label} cached to OPFS`);
@@ -199,13 +207,21 @@ async function loadOneFile(label, opfsPath, url) {
 }
 
 async function loadModelBuffer(modelConfig) {
-    const mainBuffer = await loadOneFile(modelConfig.label, modelConfig.opfsPath, modelConfig.url);
+    const mainBuffer = await loadOneFile(
+        modelConfig.label,
+        modelConfig.opfsPath,
+        modelConfig.url,
+        "model graph",
+        [0, 5],
+    );
     let externalBuffer = null;
     if (modelConfig.externalDataUrl) {
         externalBuffer = await loadOneFile(
             modelConfig.label + " (weights)",
             modelConfig.externalDataOpfsPath,
             modelConfig.externalDataUrl,
+            "weights",
+            [5, 85],
         );
     }
     return { mainBuffer, externalBuffer };
@@ -241,8 +257,8 @@ async function detectCapabilities() {
 
 async function createSessionWithCascade(modelBuffers, caps, selection, modelConfig) {
     const all = [
-        { id: "webnn-npu", name: "webnn", deviceType: "npu", label: "WebNN-NPU", available: caps.webnn_npu },
-        { id: "webnn-gpu", name: "webnn", deviceType: "gpu", label: "WebNN-GPU", available: caps.webnn_gpu },
+        { id: "webnn-npu", name: "webnn", deviceType: "npu", label: "WebNN NPU", available: caps.webnn_npu },
+        { id: "webnn-gpu", name: "webnn", deviceType: "gpu", label: "WebNN GPU", available: caps.webnn_gpu },
         { id: "webgpu", name: "webgpu", label: "WebGPU", available: caps.webgpu },
         { id: "wasm", name: "wasm", label: "WASM", available: true },
     ];
@@ -251,7 +267,7 @@ async function createSessionWithCascade(modelBuffers, caps, selection, modelConf
         throw new Error(`Backend "${selection}" not found`);
     }
     if (selection !== "auto") {
-        log(`Backend forced to ${backends[0].label} (no fallback).`);
+        log(`Backend forced to ${backends[0].label}.`);
     }
 
     const { mainBuffer, externalBuffer } = modelBuffers;
@@ -291,8 +307,10 @@ async function createSessionWithCascade(modelBuffers, caps, selection, modelConf
                 sessionOptions.executionProviders.push({ name: backend.name });
             }
 
+            const tCreate = performance.now();
             const session = await ort.InferenceSession.create(mainBuffer, sessionOptions);
-            log(`✓ Session created with ${backend.label}`);
+            const createSec = (performance.now() - tCreate) / 1000;
+            log(`✓ Session created with ${backend.label} in ${createSec.toFixed(2)}s`);
             return { session, backendLabel: backend.label };
         } catch (err) {
             log(`✗ ${backend.label} failed: ${err.message}`);
@@ -774,15 +792,18 @@ function formatSamples(n) {
 function clearStemResults() {
     resetStemMixer();
     document.getElementById("stem-grid").innerHTML = "";
-    document.getElementById("results-controls").style.display = "none";
-    document.getElementById("results-gate-msg").style.display = "";
+    document.getElementById("stem-stats").innerHTML = "";
+    document.getElementById("results-gate-msg").hidden = document.getElementById("mix-track").hidden;
     window.__htdemucsStems = null;
     window.__htdemucsStemBlobs = null;
 }
 
 async function handleAudioFile(file) {
     const infoEl = document.getElementById("audio-info");
-    infoEl.innerHTML = "<em>Decoding...</em>";
+    infoEl.innerHTML = "";
+    document.getElementById("mix-track").hidden = true;
+    document.getElementById("track-file").textContent = file.name;
+    showStageMessage("Decoding…");
     clearStemResults();
     log("");
     log(`=== AUDIO INGEST: ${file.name} (${(file.size / 1048576).toFixed(2)} MB) ===`);
@@ -790,7 +811,7 @@ async function handleAudioFile(file) {
     log(
         `Source: ${decoded.sampleRate} Hz, ${decoded.numberOfChannels} ch, ${decoded.duration.toFixed(2)}s, ${decoded.length.toLocaleString()} samples`,
     );
-    infoEl.innerHTML = "<em>Resampling...</em>";
+    showStageMessage("Resampling…");
     const resampled = await resampleTo44100(decoded);
     if (resampled === decoded) {
         log(`Resample: not needed (already 44100 Hz)`);
@@ -813,10 +834,15 @@ async function handleAudioFile(file) {
     log(`Sanity L[0..5]: [${sampleL.join(", ")}]`);
     log(`Sanity R[0..5]: [${sampleR.join(", ")}]`);
     const inputAudio = document.getElementById("input-audio");
+    inputAudio.pause();
     inputAudio.src = URL.createObjectURL(file);
-    inputAudio.hidden = false;
-    const inputWaveform = document.getElementById("input-waveform");
-    inputWaveform.hidden = false;
+    // A fresh canvas drops the previous file's waveform listeners.
+    const oldWaveform = document.getElementById("input-waveform");
+    const inputWaveform = oldWaveform.cloneNode(false);
+    oldWaveform.replaceWith(inputWaveform);
+    document.getElementById("stage-empty").hidden = true;
+    document.getElementById("mix-track").hidden = false;
+    document.getElementById("results-gate-msg").hidden = false;
     setupWaveform(inputWaveform, left, right, inputAudio, "#3f6f9f");
     infoEl.innerHTML = `
         <details class="audio-details">
@@ -829,7 +855,6 @@ async function handleAudioFile(file) {
             <tr><th>Last segment padding</th><td>${last.padSamples.toLocaleString()} samples</td></tr>
           </table>
         </details>
-        <div class="audio-ready">Audio ready for separation.</div>
       `;
     window.__htdemucsChunks = {
         segments,
@@ -841,11 +866,7 @@ async function handleAudioFile(file) {
         sourceFilename: file.name,
     };
     log(`✓ Audio prepared for separation.`);
-    const inferBtn = document.getElementById("infer-btn");
-    if (window.__htdemucsSession) {
-        inferBtn.disabled = false;
-        document.getElementById("infer-gate-msg").textContent = "(Ready — click Start Separation.)";
-    }
+    updateSessionState();
 }
 
 // ============================================================================
@@ -1362,16 +1383,13 @@ async function runInference() {
         totalSamples,
         sampleRate: TARGET_SAMPLE_RATE,
     };
-    const streamPlayback = document.getElementById("stream-playback").checked;
     let frontier = 0; // samples finalized and handed to the mixer
     let streamMs = 0; // wall time spent on streaming, measured so it can be subtracted
     let sumSegMs = 0; // pure inference time, immune to streaming overhead
-    if (streamPlayback) {
-        // Nothing above this point awaits, so we are still inside the Start
-        // Separation click task and the AudioContext is allowed to start.
-        renderStemShells(stemResult, chunks.sourceFilename, true);
-        log(`  streaming playback on (starts after ${STREAM_LEAD_CHUNKS} × ${(HOP / TARGET_SAMPLE_RATE).toFixed(2)}s)`);
-    }
+    // Nothing above this point awaits, so we are still inside the Start
+    // Separation click task and the AudioContext is allowed to start.
+    renderStemShells(stemResult, chunks.sourceFilename);
+    log(`  streaming playback on (starts after ${STREAM_LEAD_CHUNKS} × ${(HOP / TARGET_SAMPLE_RATE).toFixed(2)}s)`);
     const inputName = session.inputNames[0];
     const outputName = modelConfig.primaryOutput || session.outputNames[0];
     const extraInputs = fwdOnly ? [] : modelConfig.extraInputs || [];
@@ -1440,21 +1458,18 @@ async function runInference() {
         for (const t of segTensors) t.dispose?.();
         segments[segIdx] = null;
         sumSegMs += segMs;
-        if (streamPlayback) {
-            const tStream = performance.now();
-            // The last segment has no successor, so it closes out the tail in
-            // one jump rather than advancing by a single hop.
-            const newFrontier =
-                segIdx === segments.length - 1 ? totalSamples : Math.min((segIdx + 1) * HOP, totalSamples);
-            if (newFrontier > frontier) {
-                finalizeStemRange(stems, weightSum, frontier, newFrontier, std, mean);
-                const wallSoFar = (performance.now() - t0) / 1000;
-                stemMixer.streamRatio = wallSoFar > 0 ? newFrontier / TARGET_SAMPLE_RATE / wallSoFar : 0;
-                publishStemRegion(stemResult, frontier, newFrontier);
-                frontier = newFrontier;
-            }
-            streamMs += performance.now() - tStream;
+        const tStream = performance.now();
+        // The last segment has no successor, so it closes out the tail in
+        // one jump rather than advancing by a single hop.
+        const newFrontier = segIdx === segments.length - 1 ? totalSamples : Math.min((segIdx + 1) * HOP, totalSamples);
+        if (newFrontier > frontier) {
+            finalizeStemRange(stems, weightSum, frontier, newFrontier, std, mean);
+            const wallSoFar = (performance.now() - t0) / 1000;
+            stemMixer.streamRatio = wallSoFar > 0 ? newFrontier / TARGET_SAMPLE_RATE / wallSoFar : 0;
+            publishStemRegion(stemResult, frontier, newFrontier);
+            frontier = newFrontier;
         }
+        streamMs += performance.now() - tStream;
         const elapsed = (performance.now() - t0) / 1000;
         const pct = ((segIdx + 1) / segments.length) * 100;
         progressFill.style.width = `${pct}%`;
@@ -1465,10 +1480,6 @@ async function runInference() {
         log(`  seg ${segIdx + 1}/${segments.length}: ${(segMs / 1000).toFixed(2)}s`);
         await new Promise(resolve => requestAnimationFrame(resolve));
     }
-    log(`Finalizing stems (divide by weightSum${normalizeExternally ? ", un-normalize" : ""})...`);
-    // A no-op when streaming already finalized every range, the whole track
-    // otherwise. Either way each sample is finalized exactly once.
-    finalizeStemRange(stems, weightSum, frontier, totalSamples, std, mean);
     const totalElapsed = (performance.now() - t0) / 1000;
     const audioDuration = totalSamples / TARGET_SAMPLE_RATE;
     const realtimeRatio = audioDuration / totalElapsed;
@@ -1488,11 +1499,9 @@ async function runInference() {
     // Sum of the per-segment timings, which are taken before any overlap-add or
     // streaming work — the figure to compare backends on.
     log(`  pure inference ${inferenceSeconds.toFixed(1)}s (${inferenceRatio.toFixed(2)}× realtime)`);
-    if (streamPlayback) {
-        log(
-            `  streaming overhead ${(streamMs / 1000).toFixed(2)}s (${((streamMs / 1000 / totalElapsed) * 100).toFixed(1)}% of wall)`,
-        );
-    }
+    log(
+        `  streaming overhead ${(streamMs / 1000).toFixed(2)}s (${((streamMs / 1000 / totalElapsed) * 100).toFixed(1)}% of wall)`,
+    );
     log(`  sum-of-stems vs mix MAE: ${mixMAE.toExponential(3)}`);
     const rows = [];
     for (let s = 0; s < 4; s++) {
@@ -1506,24 +1515,26 @@ async function runInference() {
         );
     }
     resultEl.innerHTML = `
-        <table class="tensor-table">
-          <tr><th>Stem</th><th>Peak L</th><th>Peak R</th><th>RMS L</th><th>RMS R</th></tr>
-          ${rows.join("")}
-        </table>
-        <div style="margin-top: 10px; font-size: 13px; color: #155724; background: #d4edda; padding: 8px; border-radius: 4px;">
-          ✓ Separation complete — ${totalElapsed.toFixed(1)}s wall for ${audioDuration.toFixed(1)}s of audio (${realtimeRatio.toFixed(2)}× realtime).
-          <br />Pure inference ${inferenceSeconds.toFixed(1)}s (${inferenceRatio.toFixed(2)}× realtime)${streamPlayback ? ` · streaming overhead ${(streamMs / 1000).toFixed(2)}s` : ""}.
-        </div>
-        <div style="margin-top: 6px; font-size: 12px; color: #666;">
-          sum-of-stems vs mix MAE: ${mixMAE.toExponential(3)} (small ≈ correct overlap-add + de-norm)
-        </div>
+        <span class="result-ok">✓ Separated in ${totalElapsed.toFixed(1)}s · ${realtimeRatio.toFixed(2)}× realtime · ${window.__htdemucsBackend}</span>
+        <span class="result-sub">pure inference ${inferenceSeconds.toFixed(1)}s (${inferenceRatio.toFixed(2)}×) · streaming overhead ${(streamMs / 1000).toFixed(2)}s</span>
+      `;
+    document.getElementById("stem-stats").innerHTML = `
+        <details class="audio-details">
+          <summary>Stem statistics</summary>
+          <table class="tensor-table">
+            <tr><th>Stem</th><th>Peak L</th><th>Peak R</th><th>RMS L</th><th>RMS R</th></tr>
+            ${rows.join("")}
+          </table>
+          <div class="result-note">
+            sum-of-stems vs mix MAE: ${mixMAE.toExponential(3)} (small ≈ correct overlap-add + de-norm)
+          </div>
+        </details>
       `;
     window.__htdemucsStems = stemResult;
     log(`✓ Separation complete.`);
     // Streaming already built the tiles and the audio graph; only the WAV
     // encoding and downloads are left.
-    if (streamPlayback) finalizeStemResults(stemResult, chunks.sourceFilename);
-    else renderStemResults(stemResult, chunks.sourceFilename);
+    finalizeStemResults(stemResult, chunks.sourceFilename);
 }
 
 // ============================================================================
@@ -2036,6 +2047,7 @@ async function mixerPlay() {
             return; // no gesture available; leave the transport idle
         }
     }
+    document.getElementById("input-audio").pause();
     stemMixer.startedAt = context.currentTime + START_LEAD_SECONDS;
     stemMixer.startOffset = offset;
     stemMixer.playing = true;
@@ -2084,12 +2096,15 @@ function formatClock(seconds) {
 
 function updateTransportUi() {
     const playBtn = document.getElementById("mixer-play-btn");
+    const stopBtn = document.getElementById("mixer-stop-btn");
     const clock = document.getElementById("mixer-clock");
     const stat = document.getElementById("mixer-stream-stat");
     if (playBtn) {
-        playBtn.textContent = stemMixer.playing ? "⏸ Pause" : "▶ Play";
+        playBtn.classList.toggle("playing", stemMixer.playing);
+        playBtn.title = stemMixer.playing ? "Pause stems" : "Play stems";
         playBtn.disabled = stemMixer.chunks.length === 0;
     }
+    if (stopBtn) stopBtn.disabled = stemMixer.chunks.length === 0;
     if (clock) clock.textContent = `${formatClock(mixerPosition())} / ${formatClock(stemMixer.duration)}`;
     if (stat) {
         stat.style.display = stemMixer.streaming ? "" : "none";
@@ -2156,10 +2171,10 @@ function bindTransportControls() {
 }
 
 // Everything that does not need finished audio: tiles, waveforms, mute/solo,
-// and the audio graph. Streaming calls this before the segment loop so the
-// waveforms can fill in as regions land; `stems` holds the preallocated
-// output arrays, which the loop writes into in place.
-function renderStemShells(stems, sourceFilename, streaming) {
+// and the audio graph. Called before the segment loop so the waveforms can
+// fill in as regions land; `stems` holds the preallocated output arrays,
+// which the loop writes into in place.
+function renderStemShells(stems, sourceFilename) {
     resetStemMixer();
     const grid = document.getElementById("stem-grid");
     grid.innerHTML = "";
@@ -2172,7 +2187,7 @@ function renderStemShells(stems, sourceFilename, streaming) {
     // audio is ready, and a streaming run has none yet. Left unset, the
     // waveforms would paint every column from the still-empty arrays and then
     // consider themselves complete.
-    stemMixer.streaming = streaming;
+    stemMixer.streaming = true;
     createMixerContext();
 
     const downloadAllBtn = document.getElementById("download-all-btn");
@@ -2182,21 +2197,25 @@ function renderStemShells(stems, sourceFilename, streaming) {
     for (const name of STEM_NAMES) {
         const stem = stems[name];
         const tile = document.createElement("div");
-        tile.style.cssText = "border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px; background: #fafafa;";
+        tile.className = "track";
         tile.innerHTML = `
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-            <div style="font-weight: 600; color: ${STEM_COLORS[name]}; text-transform: uppercase; letter-spacing: 0.5px; font-size: 13px;">${name}</div>
-            <div class="stem-size" style="font-size: 11px; color: #888; font-family: 'Consolas', monospace;">—</div>
+          <div class="track-head">
+            <div class="track-name" style="color: ${STEM_COLORS[name]};">${name}</div>
+            <div class="stem-toggles">
+              <button class="stem-toggle mute" data-stem="${name}" aria-pressed="false" title="Mute ${name}">M</button>
+              <button class="stem-toggle solo" data-stem="${name}" aria-pressed="false" title="Solo ${name}">S</button>
+            </div>
           </div>
-          <canvas class="stem-waveform" data-color="${STEM_COLORS[name]}" aria-label="${name} waveform" style="display: block; width: 100%; height: 96px; margin-bottom: 8px; border: 1px solid #e0e0e0; cursor: pointer;"></canvas>
-          <div class="stem-toggles">
-            <button class="stem-toggle mute" data-stem="${name}" aria-pressed="false" title="Mute ${name}">M</button>
-            <button class="stem-toggle solo" data-stem="${name}" aria-pressed="false" title="Solo ${name}">S</button>
+          <canvas class="track-waveform" data-color="${STEM_COLORS[name]}" aria-label="${name} waveform"></canvas>
+          <div class="track-tail">
+            <button class="icon-btn small stem-download-btn" data-stem="${name}" title="Separating ${baseName}.${name}.wav…" disabled>
+              <svg viewBox="0 -960 960 960"><path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z" /></svg>
+            </button>
+            <div class="stem-size">—</div>
           </div>
-          <button class="stem-download-btn" data-stem="${name}" style="width: 100%;" disabled>Separating ${baseName}.${name}.wav…</button>
         `;
         grid.appendChild(tile);
-        const canvas = tile.querySelector(".stem-waveform");
+        const canvas = tile.querySelector(".track-waveform");
         const waveformState = setupWaveform(canvas, stem.left, stem.right, stemTransport, STEM_COLORS[name], () =>
             stemMixer.streaming ? stemMixer.frontierSamples : stemMixer.totalSamples,
         );
@@ -2213,8 +2232,7 @@ function renderStemShells(stems, sourceFilename, streaming) {
             redraw: () => waveformState.draw(),
         };
     }
-    document.getElementById("results-gate-msg").style.display = "none";
-    document.getElementById("results-controls").style.display = "block";
+    document.getElementById("results-gate-msg").hidden = true;
     bindTransportControls();
     updateTransportUi();
     updateStemTileStates();
@@ -2239,7 +2257,7 @@ function finalizeStemResults(stems, sourceFilename) {
         if (!tile) continue;
         tile.sizeEl.textContent = `${(blob.size / 1048576).toFixed(1)} MB`;
         tile.downloadBtn.disabled = false;
-        tile.downloadBtn.textContent = `Download ${baseName}.${name}.wav`;
+        tile.downloadBtn.title = `Download ${baseName}.${name}.wav`;
         tile.downloadBtn.onclick = () => triggerDownload(blobs[name], `${baseName}.${name}.wav`);
         tile.redraw();
     }
@@ -2254,13 +2272,6 @@ function finalizeStemResults(stems, sourceFilename) {
     updateTransportUi();
     window.__htdemucsStemBlobs = blobs;
     log(`✓ Stem audio is ready.`);
-}
-
-// Non-streaming path: shells, then the whole track as one region.
-function renderStemResults(stems, sourceFilename) {
-    renderStemShells(stems, sourceFilename, false);
-    publishStemRegion(stems, 0, stems.totalSamples);
-    finalizeStemResults(stems, sourceFilename);
 }
 
 // ============================================================================
@@ -2490,8 +2501,8 @@ async function runModelValidation() {
         xtOut.dispose?.();
         xTensor.dispose?.();
         xtTensor.dispose?.();
-        // fp16 (WebNN-NPU/GPU via DirectML) typically has worst-case ~1e-2 to 5e-2 on
-        // large tensors; mean error is the more meaningful measure. Pass if MAE < 1e-3.
+        // fp16 typically has worst-case ~1e-2 to 5e-2 on large tensors;
+        // mean error is the more meaningful measure. Pass if MAE < 1e-3.
         const pass = xCmp.mae < 1e-3 && xtCmp.mae < 1e-3;
         log(pass ? `✓ fwd VALIDATION PASSED (MAE check; fp16 ok)` : `✗ fwd VALIDATION FAILED (MAE too large)`);
         resultEl.innerHTML = `
@@ -2587,25 +2598,63 @@ async function runPostForwardValidation() {
 // Main
 // ============================================================================
 
+const backendSelect = document.getElementById("backend-select");
+// Backend-select value the live session was created from; null when there is no usable session.
+let loadedSelection = null;
+
+function isSessionStale() {
+    return loadedSelection !== null && backendSelect.value !== loadedSelection;
+}
+
+// Single place that derives the Load / Start buttons, badge and status from the session state.
+function updateSessionState() {
+    const hasSession = loadedSelection !== null;
+    const stale = isSessionStale();
+    loadBtn.textContent = hasSession ? (stale ? "Reload Model" : "Model Loaded") : "Load Model";
+    loadBtn.disabled = hasSession && !stale;
+    loadBtn.classList.toggle("attention", stale);
+    document.getElementById("infer-btn").disabled = !hasSession || stale || !window.__htdemucsChunks;
+    if (hasSession) {
+        updateBackendBadge(window.__htdemucsBackend);
+        statusEl.innerHTML = stale
+            ? `Backend changed — click <strong>Reload Model</strong> to apply. Still using <strong>${window.__htdemucsBackend}</strong>.`
+            : `Session loaded with <strong>${window.__htdemucsBackend}</strong>`;
+    } else {
+        updateBackendBadge(backendSelect.value);
+    }
+}
+
 async function main() {
+    const mainEl = document.querySelector(".main");
     loadBtn.disabled = true;
+    backendSelect.disabled = true;
+    document.getElementById("infer-btn").disabled = true;
+    // The overlay covers the tracks, so nothing underneath should keep playing.
+    if (stemMixer.playing) mixerPause();
+    inputAudioEl.pause();
+    mainEl.classList.add("busy");
     statusEl.textContent = "Loading...";
+    setLoadProgress(0, "Preparing…");
 
     try {
         await loadOrt();
 
+        const previous = window.__htdemucsSession;
+        if (previous) {
+            // Freed before the new compile so two copies never sit on the NPU/GPU at once.
+            window.__htdemucsSession = null;
+            loadedSelection = null;
+            await previous.release?.();
+            log(`Released previous ${window.__htdemucsBackend} session.`);
+        }
+
         log("");
         log("Probing backend capabilities...");
         const caps = await detectCapabilities();
-        const capBadges = [];
-        if (caps.webnn_npu) capBadges.push('<span class="badge badge-success">WebNN-NPU</span>');
-        if (caps.webnn_gpu) capBadges.push('<span class="badge badge-success">WebNN-GPU</span>');
-        if (caps.webgpu) capBadges.push('<span class="badge badge-info">WebGPU</span>');
-        capBadges.push('<span class="badge badge-warning">WASM</span>');
         log(
             `Available: ${[
-                caps.webnn_npu ? "WebNN-NPU" : null,
-                caps.webnn_gpu ? "WebNN-GPU" : null,
+                caps.webnn_npu ? "WebNN NPU" : null,
+                caps.webnn_gpu ? "WebNN GPU" : null,
                 caps.webgpu ? "WebGPU" : null,
                 "WASM",
             ]
@@ -2614,34 +2663,43 @@ async function main() {
         );
 
         log("");
-        const modelKey = document.getElementById("model-select").value;
-        const modelConfig = MODELS[modelKey];
+        const modelConfig = MODELS.htdemucs_fwd;
         log(`Using model: ${modelConfig.label}`);
         const modelBuffer = await loadModelBuffer(modelConfig);
-        hideProgress();
 
         log("");
         log("Creating ORT session (trying backends in cascade)...");
-        const selection = document.getElementById("backend-select").value;
+        const selection = backendSelect.value;
         updateBackendBadge(selection);
+        setLoadProgress(90, `Compiling for ${backendSelect.selectedOptions[0].textContent}…`);
         const { session, backendLabel } = await createSessionWithCascade(modelBuffer, caps, selection, modelConfig);
         window.__htdemucsSession = session;
         window.__htdemucsBackend = backendLabel;
         window.__htdemucsModelConfig = modelConfig;
-        updateBackendBadge(backendLabel);
-
-        statusEl.innerHTML = `${capBadges.join(" ")} — Session loaded with <strong>${backendLabel}</strong>`;
+        loadedSelection = selection;
 
         log("");
         log("✓ Model loaded and ready for audio.");
         document.getElementById("audio-file").disabled = false;
-        document.getElementById("audio-gate-msg").textContent = "Choose an audio file.";
+        if (document.getElementById("mix-track").hidden) {
+            showStageMessage("Model ready — upload an audio file to begin.");
+        }
+        setLoadProgress(100);
+        updateSessionState();
     } catch (err) {
         log("✗ Error: " + err.message);
         console.error(err);
+        updateSessionState();
         statusEl.innerHTML = `<span class="badge badge-error">Failed: ${err.message}</span>`;
+        if (!window.__htdemucsSession) document.getElementById("device").textContent = "—";
+        if (document.getElementById("mix-track").hidden) {
+            showStageMessage("Model failed to load — see the log for details.");
+        }
     } finally {
-        loadBtn.disabled = false;
+        hideLoadProgress();
+        mainEl.classList.remove("busy");
+        backendSelect.disabled = false;
+        if (!window.__htdemucsSession) loadBtn.disabled = false;
     }
 }
 
@@ -2674,16 +2732,24 @@ updateWebnnStatus();
 loadOrt();
 
 loadBtn.addEventListener("click", main);
-document.getElementById("backend-select").addEventListener("change", event => {
-    updateBackendBadge(event.target.value);
+backendSelect.addEventListener("change", updateSessionState);
+
+const inputAudioEl = document.getElementById("input-audio");
+const mixPlayBtn = document.getElementById("mix-play-btn");
+mixPlayBtn.addEventListener("click", () => {
+    if (inputAudioEl.paused) inputAudioEl.play().catch(() => {});
+    else inputAudioEl.pause();
 });
+// The mix preview and the stem mixer share the speakers, so only one plays at a time.
+inputAudioEl.addEventListener("play", () => {
+    mixPlayBtn.classList.add("playing");
+    if (stemMixer.playing) mixerPause();
+});
+inputAudioEl.addEventListener("pause", () => mixPlayBtn.classList.remove("playing"));
 
 document.getElementById("infer-btn").addEventListener("click", async () => {
     const btn = document.getElementById("infer-btn");
-    // Read once at the top of the run, so flipping it mid-run cannot half-apply.
-    const streamToggle = document.getElementById("stream-playback");
     btn.disabled = true;
-    streamToggle.disabled = true;
     setInferenceControlsDisabled(true);
     try {
         await runInference();
@@ -2700,13 +2766,12 @@ document.getElementById("infer-btn").addEventListener("click", async () => {
         for (const name of STEM_NAMES) {
             // Otherwise the tiles sit on "Separating…" forever.
             const tile = stemMixer.tiles[name];
-            if (tile) tile.downloadBtn.textContent = "Separation incomplete";
+            if (tile) tile.downloadBtn.title = "Separation incomplete";
         }
         updateTransportUi();
     } finally {
         setInferenceControlsDisabled(false);
-        btn.disabled = false;
-        streamToggle.disabled = false;
+        updateSessionState();
     }
 });
 
@@ -2720,8 +2785,7 @@ document.getElementById("audio-file").addEventListener("change", async event => 
     } catch (err) {
         log("✗ Audio ingest error: " + err.message);
         console.error(err);
-        document.getElementById("audio-info").innerHTML =
-            `<span class="badge badge-error">Failed: ${err.message}</span>`;
+        showStageMessage(`Failed to load audio: ${err.message}`);
     } finally {
         input.disabled = false;
     }
