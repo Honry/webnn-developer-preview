@@ -29,7 +29,8 @@
     <div id="status">Ready. Load the model to begin.</div>
     <div id="progress-container" style="display: none;">
       <div class="progress-bar">
-        <div class="progress-fill" id="progress-fill">0%</div>
+        <div class="progress-fill" id="progress-fill"></div>
+        <div class="progress-label" id="progress-label">0%</div>
       </div>
     </div>
     <div style="margin-top: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -68,8 +69,15 @@
       <br><em id="infer-gate-msg">Load an audio file first.</em>
     </div>
     <button id="infer-btn" disabled>Start Separation</button>
+    <label class="stream-toggle" title="Play the stems as they are separated, instead of waiting for the run to finish">
+      <input type="checkbox" id="stream-playback" checked>
+      Stream playback while separating
+    </label>
     <div id="infer-progress-container" style="display: none; margin-top: 15px;">
-      <div class="progress-bar"><div class="progress-fill" id="infer-progress-fill">0%</div></div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="infer-progress-fill"></div>
+        <div class="progress-label" id="infer-progress-label">0%</div>
+      </div>
       <div id="infer-eta" style="font-size: 12px; color: #666; margin-top: 5px;"></div>
     </div>
     <div id="infer-result" style="margin-top: 15px;"></div>
@@ -82,7 +90,14 @@
       <br><em id="results-gate-msg">Your stems will appear here after separation.</em>
     </div>
     <div id="results-controls" style="display: none; margin-bottom: 15px;">
-      <button id="download-all-btn">Download all stems (.wav)</button>
+      <div class="mixer-transport">
+        <button id="mixer-play-btn">▶ Play</button>
+        <button id="mixer-stop-btn">⏮ Start</button>
+        <span id="mixer-clock">0:00 / 0:00</span>
+        <span class="mixer-stat" id="mixer-stream-stat" style="display: none;"></span>
+        <span class="mixer-hint">All four stems play in sync — use M to mute, S to solo.</span>
+      </div>
+      <button id="download-all-btn" disabled>Download all stems (.wav)</button>
     </div>
     <div id="stem-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;"></div>
   </div>

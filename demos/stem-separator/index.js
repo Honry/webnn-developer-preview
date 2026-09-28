@@ -37,6 +37,7 @@ const statusEl = document.getElementById("status");
 const loadBtn = document.getElementById("load-btn");
 const progressContainer = document.getElementById("progress-container");
 const progressFill = document.getElementById("progress-fill");
+const progressLabel = document.getElementById("progress-label");
 const inferenceControlState = new Map();
 
 function setInferenceControlsDisabled(disabled) {
@@ -68,7 +69,7 @@ function log(message) {
 function setProgress(percent, label) {
     progressContainer.style.display = "block";
     progressFill.style.width = `${percent}%`;
-    progressFill.textContent = label || `${Math.round(percent)}%`;
+    progressLabel.textContent = label || `${Math.round(percent)}%`;
 }
 
 function hideProgress() {
@@ -767,9 +768,22 @@ function formatSamples(n) {
     return `${n.toLocaleString()} samples (${(n / TARGET_SAMPLE_RATE).toFixed(2)}s)`;
 }
 
+// Stems from the previous run or file are stale the moment a new one starts:
+// stop the mixer and clear them so nothing keeps playing underneath, and so
+// the panel never shows results that do not match the progress bar above it.
+function clearStemResults() {
+    resetStemMixer();
+    document.getElementById("stem-grid").innerHTML = "";
+    document.getElementById("results-controls").style.display = "none";
+    document.getElementById("results-gate-msg").style.display = "";
+    window.__htdemucsStems = null;
+    window.__htdemucsStemBlobs = null;
+}
+
 async function handleAudioFile(file) {
     const infoEl = document.getElementById("audio-info");
     infoEl.innerHTML = "<em>Decoding...</em>";
+    clearStemResults();
     log("");
     log(`=== AUDIO INGEST: ${file.name} (${(file.size / 1048576).toFixed(2)} MB) ===`);
     const decoded = await decodeAudioFile(file);
@@ -1269,6 +1283,22 @@ function computeStats(buffer) {
     return { peak, rms };
 }
 
+// Divides out the overlap-add weights and undoes the global normalization over
+// one sample range. Sample i takes no contribution from any segment after
+// floor(i/HOP), so running this on a finalized range mid-loop is bit-identical
+// to one pass at the end: the accumulated float value is already final.
+function finalizeStemRange(stems, weightSum, from, to, std, mean) {
+    for (let s = 0; s < 4; s++) {
+        for (let c = 0; c < 2; c++) {
+            const stem = stems[s][c];
+            for (let i = from; i < to; i++) {
+                const wSum = weightSum[i];
+                if (wSum > 0) stem[i] = (stem[i] / wSum) * std + mean;
+            }
+        }
+    }
+}
+
 async function runInference() {
     const session = window.__htdemucsSession;
     const chunks = window.__htdemucsChunks;
@@ -1279,10 +1309,18 @@ async function runInference() {
     const { left, right, totalSamples } = chunks;
     const progressContainer = document.getElementById("infer-progress-container");
     const progressFill = document.getElementById("infer-progress-fill");
+    const progressLabel = document.getElementById("infer-progress-label");
     const etaEl = document.getElementById("infer-eta");
     const resultEl = document.getElementById("infer-result");
     progressContainer.style.display = "block";
+    progressFill.style.width = "0%";
+    progressLabel.textContent = "0%";
+    etaEl.textContent = "";
     resultEl.innerHTML = "";
+    // Tear the previous run's stems down before this one starts, in both modes.
+    // Streaming rebuilds the tiles below; the non-streaming path leaves the
+    // panel empty until it finishes, rather than showing stale results.
+    clearStemResults();
     log("");
     log(`=== SEPARATION + OVERLAP-ADD (model: ${modelConfig.label}) ===`);
     const fwdOnly = modelConfig.fwdOnly === true;
@@ -1314,6 +1352,26 @@ async function runInference() {
         stems.push([new Float32Array(totalSamples), new Float32Array(totalSamples)]);
     }
     const weightSum = new Float32Array(totalSamples);
+    // The output arrays are preallocated, so the result object can go to the UI
+    // before a single segment has run; the loop fills it in place.
+    const stemResult = {
+        drums: { left: stems[0][0], right: stems[0][1] },
+        bass: { left: stems[1][0], right: stems[1][1] },
+        other: { left: stems[2][0], right: stems[2][1] },
+        vocals: { left: stems[3][0], right: stems[3][1] },
+        totalSamples,
+        sampleRate: TARGET_SAMPLE_RATE,
+    };
+    const streamPlayback = document.getElementById("stream-playback").checked;
+    let frontier = 0; // samples finalized and handed to the mixer
+    let streamMs = 0; // wall time spent on streaming, measured so it can be subtracted
+    let sumSegMs = 0; // pure inference time, immune to streaming overhead
+    if (streamPlayback) {
+        // Nothing above this point awaits, so we are still inside the Start
+        // Separation click task and the AudioContext is allowed to start.
+        renderStemShells(stemResult, chunks.sourceFilename, true);
+        log(`  streaming playback on (starts after ${STREAM_LEAD_CHUNKS} × ${(HOP / TARGET_SAMPLE_RATE).toFixed(2)}s)`);
+    }
     const inputName = session.inputNames[0];
     const outputName = modelConfig.primaryOutput || session.outputNames[0];
     const extraInputs = fwdOnly ? [] : modelConfig.extraInputs || [];
@@ -1381,10 +1439,26 @@ async function runInference() {
         }
         for (const t of segTensors) t.dispose?.();
         segments[segIdx] = null;
+        sumSegMs += segMs;
+        if (streamPlayback) {
+            const tStream = performance.now();
+            // The last segment has no successor, so it closes out the tail in
+            // one jump rather than advancing by a single hop.
+            const newFrontier =
+                segIdx === segments.length - 1 ? totalSamples : Math.min((segIdx + 1) * HOP, totalSamples);
+            if (newFrontier > frontier) {
+                finalizeStemRange(stems, weightSum, frontier, newFrontier, std, mean);
+                const wallSoFar = (performance.now() - t0) / 1000;
+                stemMixer.streamRatio = wallSoFar > 0 ? newFrontier / TARGET_SAMPLE_RATE / wallSoFar : 0;
+                publishStemRegion(stemResult, frontier, newFrontier);
+                frontier = newFrontier;
+            }
+            streamMs += performance.now() - tStream;
+        }
         const elapsed = (performance.now() - t0) / 1000;
         const pct = ((segIdx + 1) / segments.length) * 100;
         progressFill.style.width = `${pct}%`;
-        progressFill.textContent = `${segIdx + 1} / ${segments.length}`;
+        progressLabel.textContent = `${segIdx + 1} / ${segments.length}`;
         const avgPerSeg = elapsed / (segIdx + 1);
         const remaining = avgPerSeg * (segments.length - segIdx - 1);
         etaEl.textContent = `Elapsed ${elapsed.toFixed(1)}s · est. remaining ${remaining.toFixed(1)}s · last segment ${(segMs / 1000).toFixed(2)}s`;
@@ -1392,18 +1466,14 @@ async function runInference() {
         await new Promise(resolve => requestAnimationFrame(resolve));
     }
     log(`Finalizing stems (divide by weightSum${normalizeExternally ? ", un-normalize" : ""})...`);
-    for (let s = 0; s < 4; s++) {
-        for (let c = 0; c < 2; c++) {
-            const stem = stems[s][c];
-            for (let i = 0; i < totalSamples; i++) {
-                const wSum = weightSum[i];
-                if (wSum > 0) stem[i] = (stem[i] / wSum) * std + mean;
-            }
-        }
-    }
+    // A no-op when streaming already finalized every range, the whole track
+    // otherwise. Either way each sample is finalized exactly once.
+    finalizeStemRange(stems, weightSum, frontier, totalSamples, std, mean);
     const totalElapsed = (performance.now() - t0) / 1000;
     const audioDuration = totalSamples / TARGET_SAMPLE_RATE;
     const realtimeRatio = audioDuration / totalElapsed;
+    const inferenceSeconds = sumSegMs / 1000;
+    const inferenceRatio = audioDuration / inferenceSeconds;
     let mixErr = 0;
     for (let i = 0; i < totalSamples; i++) {
         const sumL = stems[0][0][i] + stems[1][0][i] + stems[2][0][i] + stems[3][0][i];
@@ -1413,8 +1483,16 @@ async function runInference() {
     const mixMAE = mixErr / (totalSamples * 2);
     log("");
     log(
-        `✓ Inference complete in ${totalElapsed.toFixed(1)}s (first seg ${(firstSegMs / 1000).toFixed(2)}s, realtime ${realtimeRatio.toFixed(2)}×)`,
+        `✓ Inference complete in ${totalElapsed.toFixed(1)}s wall (first seg ${(firstSegMs / 1000).toFixed(2)}s, realtime ${realtimeRatio.toFixed(2)}×)`,
     );
+    // Sum of the per-segment timings, which are taken before any overlap-add or
+    // streaming work — the figure to compare backends on.
+    log(`  pure inference ${inferenceSeconds.toFixed(1)}s (${inferenceRatio.toFixed(2)}× realtime)`);
+    if (streamPlayback) {
+        log(
+            `  streaming overhead ${(streamMs / 1000).toFixed(2)}s (${((streamMs / 1000 / totalElapsed) * 100).toFixed(1)}% of wall)`,
+        );
+    }
     log(`  sum-of-stems vs mix MAE: ${mixMAE.toExponential(3)}`);
     const rows = [];
     for (let s = 0; s < 4; s++) {
@@ -1433,22 +1511,19 @@ async function runInference() {
           ${rows.join("")}
         </table>
         <div style="margin-top: 10px; font-size: 13px; color: #155724; background: #d4edda; padding: 8px; border-radius: 4px;">
-          ✓ Separation complete — ${totalElapsed.toFixed(1)}s for ${audioDuration.toFixed(1)}s of audio (${realtimeRatio.toFixed(2)}× realtime).
+          ✓ Separation complete — ${totalElapsed.toFixed(1)}s wall for ${audioDuration.toFixed(1)}s of audio (${realtimeRatio.toFixed(2)}× realtime).
+          <br />Pure inference ${inferenceSeconds.toFixed(1)}s (${inferenceRatio.toFixed(2)}× realtime)${streamPlayback ? ` · streaming overhead ${(streamMs / 1000).toFixed(2)}s` : ""}.
         </div>
         <div style="margin-top: 6px; font-size: 12px; color: #666;">
           sum-of-stems vs mix MAE: ${mixMAE.toExponential(3)} (small ≈ correct overlap-add + de-norm)
         </div>
       `;
-    window.__htdemucsStems = {
-        drums: { left: stems[0][0], right: stems[0][1] },
-        bass: { left: stems[1][0], right: stems[1][1] },
-        other: { left: stems[2][0], right: stems[2][1] },
-        vocals: { left: stems[3][0], right: stems[3][1] },
-        totalSamples,
-        sampleRate: TARGET_SAMPLE_RATE,
-    };
+    window.__htdemucsStems = stemResult;
     log(`✓ Separation complete.`);
-    renderStemResults(window.__htdemucsStems, chunks.sourceFilename);
+    // Streaming already built the tiles and the audio graph; only the WAV
+    // encoding and downloads are left.
+    if (streamPlayback) finalizeStemResults(stemResult, chunks.sourceFilename);
+    else renderStemResults(stemResult, chunks.sourceFilename);
 }
 
 // ============================================================================
@@ -1509,14 +1584,6 @@ const STEM_COLORS = {
     vocals: "#27ae60",
 };
 
-const stemObjectUrls = [];
-
-function clearStemObjectUrls() {
-    while (stemObjectUrls.length > 0) {
-        URL.revokeObjectURL(stemObjectUrls.pop());
-    }
-}
-
 function stripExtension(filename) {
     const dot = filename.lastIndexOf(".");
     return dot > 0 ? filename.substring(0, dot) : filename;
@@ -1533,38 +1600,49 @@ function triggerDownload(blob, filename) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function drawWaveform(canvas, left, right, audio, state) {
-    const context = canvas.getContext("2d");
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    const pixelRatio = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.floor(width * pixelRatio));
-    canvas.height = Math.max(1, Math.floor(height * pixelRatio));
+// The peak scan is O(total samples), so it is rendered into an offscreen
+// layer instead of per frame. With four stems animating in sync a
+// per-frame rescan would be ~10M samples x 4 x 60fps.
+function createWaveformLayer(width, height, pixelRatio) {
+    const layer = document.createElement("canvas");
+    layer.width = Math.max(1, Math.floor(width * pixelRatio));
+    layer.height = Math.max(1, Math.floor(height * pixelRatio));
+    const context = layer.getContext("2d");
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    context.clearRect(0, 0, width, height);
-
-    const middle = height / 2;
-    const peakHeight = height * 0.42;
-    const color = canvas.dataset.color;
     context.fillStyle = "#f5f5f5";
     context.fillRect(0, 0, width, height);
     context.strokeStyle = "#d9d9d9";
     context.lineWidth = 1;
     context.beginPath();
-    context.moveTo(0, middle + 0.5);
-    context.lineTo(width, middle + 0.5);
+    context.moveTo(0, height / 2 + 0.5);
+    context.lineTo(width, height / 2 + 0.5);
     context.stroke();
+    return layer;
+}
 
+// Paints the column range [xFrom, xTo) into an existing layer. Streaming
+// separation appends columns as regions finalize, so the total cost over a
+// run stays O(total samples) — rebuilding the whole layer per published
+// region would be O(N^2 / HOP). Columns are the unit rather than samples so
+// a partially covered column is never stroked twice.
+function paintWaveformColumns(layer, width, height, pixelRatio, left, right, color, xFrom, xTo) {
+    if (xTo <= xFrom) return;
+    const total = left.length;
+    if (!total) return;
+    const context = layer.getContext("2d");
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    const middle = height / 2;
+    const peakHeight = height * 0.42;
     context.strokeStyle = color;
     context.globalAlpha = 0.8;
     context.lineWidth = 1;
     context.beginPath();
-    for (let x = 0; x < width; x++) {
-        const start = Math.floor((x * left.length) / width);
-        const end = Math.max(start + 1, Math.floor(((x + 1) * left.length) / width));
+    for (let x = xFrom; x < xTo; x++) {
+        const start = Math.floor((x * total) / width);
+        const end = Math.max(start + 1, Math.floor(((x + 1) * total) / width));
         let minimum = 1;
         let maximum = -1;
-        for (let index = start; index < end && index < left.length; index++) {
+        for (let index = start; index < end && index < total; index++) {
             const sample = ((left[index] || 0) + (right[index] || 0)) * 0.5;
             minimum = Math.min(minimum, sample);
             maximum = Math.max(maximum, sample);
@@ -1574,58 +1652,580 @@ function drawWaveform(canvas, left, right, audio, state) {
     }
     context.stroke();
     context.globalAlpha = 1;
+}
 
-    if (audio.duration) {
-        const playheadX = Math.min(width, (audio.currentTime / audio.duration) * width);
+// `clock` is any object exposing the HTMLAudioElement subset we need:
+// duration, paused, a get/set currentTime, and addEventListener for
+// play/pause/ended. Both <audio> and the stem mixer transport qualify.
+function drawWaveform(canvas, left, right, clock, state) {
+    state.draw = () => drawWaveform(canvas, left, right, clock, state);
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (width < 1 || height < 1) return;
+    const pixelRatio = window.devicePixelRatio || 1;
+    const layerKey = `${width}x${height}x${pixelRatio}`;
+    if (state.layerKey !== layerKey) {
+        // A resize invalidates every column, so the layer restarts empty
+        // and is repainted below from sample 0 up to the current frontier.
+        state.layer = createWaveformLayer(width, height, pixelRatio);
+        state.layerKey = layerKey;
+        state.renderedX = 0;
+    }
+    const total = left.length;
+    const ready = state.readySamples ? Math.min(state.readySamples(), total) : total;
+    const readyX = total ? Math.floor((ready * width) / total) : 0;
+    if (readyX > state.renderedX) {
+        paintWaveformColumns(
+            state.layer,
+            width,
+            height,
+            pixelRatio,
+            left,
+            right,
+            canvas.dataset.color,
+            state.renderedX,
+            readyX,
+        );
+        state.renderedX = readyX;
+    }
+
+    const context = canvas.getContext("2d");
+    if (canvas.width !== state.layer.width || canvas.height !== state.layer.height) {
+        canvas.width = state.layer.width;
+        canvas.height = state.layer.height;
+    }
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.globalAlpha = canvas.dataset.dimmed === "1" ? 0.25 : 1;
+    context.drawImage(state.layer, 0, 0);
+    context.globalAlpha = 1;
+
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    if (ready < total) {
+        // Scrim the not-yet-separated tail and mark the frontier. This line
+        // racing ahead of the playhead is what shows the NPU keeping up.
+        const frontierX = (ready / total) * width;
+        context.fillStyle = "rgba(245, 245, 245, 0.72)";
+        context.fillRect(frontierX, 0, width - frontierX, height);
+        context.fillStyle = "#f5a623";
+        context.fillRect(Math.max(0, frontierX - 1), 0, 2, height);
+    }
+    if (clock.duration) {
+        const playheadX = Math.min(width, (clock.currentTime / clock.duration) * width);
         context.fillStyle = "#333";
         context.fillRect(Math.max(0, playheadX - 1), 0, 2, height);
     }
-    state.draw = () => drawWaveform(canvas, left, right, audio, state);
 }
 
-function setupWaveform(canvas, left, right, audio, color = "#3f6f9f") {
+// `readySamples` is an optional callback returning how much of `left`/`right`
+// currently holds final data; omit it for buffers that are complete up front.
+function setupWaveform(canvas, left, right, clock, color = "#3f6f9f", readySamples = null) {
     canvas.dataset.color = color;
-    const state = { draw: null, animationFrame: null };
+    const state = { draw: null, animationFrame: null, layer: null, layerKey: "", renderedX: 0, readySamples };
     const resizeObserver = new ResizeObserver(() => state.draw());
     resizeObserver.observe(canvas);
-    state.draw = () => drawWaveform(canvas, left, right, audio, state);
+    state.draw = () => drawWaveform(canvas, left, right, clock, state);
 
     canvas.addEventListener("click", event => {
-        if (!audio.duration) return;
+        if (!clock.duration) return;
         const bounds = canvas.getBoundingClientRect();
-        audio.currentTime = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) * audio.duration;
+        clock.currentTime = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)) * clock.duration;
         state.draw();
     });
     canvas.addEventListener("pointermove", event => {
-        canvas.title = audio.duration
-            ? `${(((event.clientX - canvas.getBoundingClientRect().left) / canvas.clientWidth) * audio.duration).toFixed(1)}s`
+        canvas.title = clock.duration
+            ? `${(((event.clientX - canvas.getBoundingClientRect().left) / canvas.clientWidth) * clock.duration).toFixed(1)}s`
             : "Waveform";
     });
-    audio.addEventListener("play", () => {
+    clock.addEventListener("play", () => {
         const animate = () => {
             state.draw();
-            if (!audio.paused) state.animationFrame = requestAnimationFrame(animate);
+            if (!clock.paused) state.animationFrame = requestAnimationFrame(animate);
         };
         cancelAnimationFrame(state.animationFrame);
         animate();
     });
-    audio.addEventListener("pause", () => {
+    clock.addEventListener("pause", () => {
         cancelAnimationFrame(state.animationFrame);
         state.draw();
     });
-    audio.addEventListener("ended", () => {
+    clock.addEventListener("ended", () => {
         cancelAnimationFrame(state.animationFrame);
         state.draw();
     });
     state.draw();
+    return state;
 }
 
-function renderStemResults(stems, sourceFilename) {
-    clearStemObjectUrls();
+// ============================================================================
+// Stem mixer: one AudioContext drives all four stems from a single clock,
+// so they stay sample-accurate. Each stem gets a persistent GainNode, and
+// mute/solo is expressed purely as gain, never by stopping a source.
+// ============================================================================
+
+const GAIN_RAMP_SECONDS = 0.01;
+const START_LEAD_SECONDS = 0.02;
+// Streaming playback waits for this much finalized audio before starting.
+// htdemucsPreForward/PostForward are long synchronous main-thread blocks, so
+// the scheduler can stall for ~1s at a time; two hops (7.8s) comfortably
+// covers that. Past this point headroom only grows, because sustaining
+// playback at all means a segment costs less than the 3.9s hop it yields.
+const STREAM_LEAD_CHUNKS = 2;
+// Refuse to start a run with less than this much playable audio ahead,
+// rather than starting one that underruns on its first frame.
+const MIN_PLAYABLE_SECONDS = 0.05;
+
+const stemMixer = {
+    context: null,
+    gains: {},
+    // Finalized audio, as [{ startSample, length, buffers: { name: AudioBuffer } }].
+    // AudioBuffers cannot grow, and mutating one after a source has start()ed
+    // on it is not spec-guaranteed, so each finalized region becomes its own
+    // buffer and is scheduled against the shared clock.
+    chunks: [],
+    scheduledUpTo: 0,
+    activeSources: [],
+    muted: new Set(),
+    solo: new Set(),
+    tiles: {}, // name -> { muteBtn, soloBtn, canvas, redraw }
+    listeners: { play: [], pause: [], ended: [] },
+    sampleRate: TARGET_SAMPLE_RATE,
+    duration: 0,
+    totalSamples: 0,
+    frontierSamples: 0, // how far separation has finalized
+    streaming: false, // true while a separation run is still producing
+    streamRatio: 0, // realtime multiple so far, for the live readout
+    autoStarted: false,
+    resumeOnPublish: false,
+    playing: false,
+    startedAt: 0, // context clock reading when the current run began
+    startOffset: 0, // track position at that instant
+    clockFrame: null,
+};
+
+// Duck-types the slice of HTMLAudioElement that setupWaveform consumes.
+const stemTransport = {
+    get duration() {
+        return stemMixer.duration;
+    },
+    get paused() {
+        return !stemMixer.playing;
+    },
+    get currentTime() {
+        return mixerPosition();
+    },
+    set currentTime(value) {
+        mixerSeek(value);
+    },
+    addEventListener(type, callback) {
+        if (stemMixer.listeners[type]) stemMixer.listeners[type].push(callback);
+    },
+};
+
+function mixerEmit(type) {
+    for (const callback of stemMixer.listeners[type] || []) callback();
+}
+
+function mixerPosition() {
+    if (!stemMixer.playing || !stemMixer.context) return stemMixer.startOffset;
+    const elapsed = Math.max(0, stemMixer.context.currentTime - stemMixer.startedAt);
+    return Math.min(stemMixer.startOffset + elapsed, stemMixer.duration);
+}
+
+// Furthest position that currently has audio behind it. While a run is in
+// flight this is the separation frontier; afterwards it is the whole track.
+function mixerPlayableLimit() {
+    if (!stemMixer.streaming) return stemMixer.duration;
+    return stemMixer.frontierSamples / stemMixer.sampleRate;
+}
+
+function effectiveStemGain(name) {
+    // Solo overrides mute while active, but never clears it: dropping the
+    // last solo falls straight back to whatever was muted before.
+    const audible = stemMixer.solo.size > 0 ? stemMixer.solo.has(name) : !stemMixer.muted.has(name);
+    return audible ? 1 : 0;
+}
+
+function applyStemGains() {
+    const context = stemMixer.context;
+    for (const name of STEM_NAMES) {
+        const gain = stemMixer.gains[name];
+        if (!gain || !context) continue;
+        // A step change on a running signal clicks; ramp instead.
+        const now = context.currentTime;
+        gain.gain.cancelScheduledValues(now);
+        gain.gain.setValueAtTime(gain.gain.value, now);
+        gain.gain.linearRampToValueAtTime(effectiveStemGain(name), now + GAIN_RAMP_SECONDS);
+    }
+    updateStemTileStates();
+}
+
+function updateStemTileStates() {
+    for (const name of STEM_NAMES) {
+        const tile = stemMixer.tiles[name];
+        if (!tile) continue;
+        const isMuted = stemMixer.muted.has(name);
+        const isSolo = stemMixer.solo.has(name);
+        tile.muteBtn.classList.toggle("active", isMuted);
+        tile.soloBtn.classList.toggle("active", isSolo);
+        tile.muteBtn.setAttribute("aria-pressed", String(isMuted));
+        tile.soloBtn.setAttribute("aria-pressed", String(isSolo));
+        tile.canvas.dataset.dimmed = effectiveStemGain(name) > 0 ? "" : "1";
+        tile.redraw();
+    }
+}
+
+function toggleStemMute(name) {
+    if (stemMixer.muted.has(name)) stemMixer.muted.delete(name);
+    else stemMixer.muted.add(name);
+    applyStemGains();
+}
+
+function toggleStemSolo(name) {
+    if (stemMixer.solo.has(name)) stemMixer.solo.delete(name);
+    else stemMixer.solo.add(name);
+    applyStemGains();
+}
+
+// Created inside the Start Separation click task (runInference has no await
+// before it), so the context comes up "running" under the autoplay policy.
+function createMixerContext() {
+    if (stemMixer.context) return stemMixer.context;
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    const context = new AudioContextCtor({ sampleRate: stemMixer.sampleRate });
+    stemMixer.context = context;
+    for (const name of STEM_NAMES) {
+        const gain = context.createGain();
+        gain.gain.value = effectiveStemGain(name);
+        gain.connect(context.destination);
+        stemMixer.gains[name] = gain;
+    }
+    return context;
+}
+
+// Turns a finalized sample range into one AudioBuffer per stem and hands it to
+// the scheduler. Ranges must never overlap — a sample de-normalized twice would
+// be silently wrong — so callers advance a single monotonic frontier.
+function publishStemRegion(stemsByName, fromSample, toSample) {
+    const context = stemMixer.context;
+    const length = toSample - fromSample;
+    if (!context || length <= 0) return;
+    const buffers = {};
+    for (const name of STEM_NAMES) {
+        const stem = stemsByName[name];
+        const buffer = context.createBuffer(2, length, stemMixer.sampleRate);
+        buffer.copyToChannel(stem.left.subarray(fromSample, toSample), 0);
+        buffer.copyToChannel(stem.right.subarray(fromSample, toSample), 1);
+        buffers[name] = buffer;
+    }
+    stemMixer.chunks.push({ startSample: fromSample, length, buffers });
+    stemMixer.frontierSamples = toSample;
+
+    if (stemMixer.resumeOnPublish && !stemMixer.playing) {
+        stemMixer.resumeOnPublish = false;
+        mixerPlay().catch(() => {});
+    } else if (stemMixer.playing) {
+        scheduleReadyChunks();
+    }
+    const leadSamples = Math.min(stemMixer.totalSamples, STREAM_LEAD_CHUNKS * HOP);
+    // Only streaming runs start themselves; the non-streaming path publishes
+    // one whole-track region and waits for the user to press Play, as before.
+    if (stemMixer.streaming && !stemMixer.autoStarted && stemMixer.frontierSamples >= leadSamples) {
+        stemMixer.autoStarted = true;
+        mixerPlay().catch(() => {});
+    }
+    updateTransportUi();
+    for (const name of STEM_NAMES) stemMixer.tiles[name]?.redraw();
+}
+
+function scheduleReadyChunks() {
+    const context = stemMixer.context;
+    if (!stemMixer.playing || !context) return;
+    while (stemMixer.scheduledUpTo < stemMixer.chunks.length) {
+        const chunk = stemMixer.chunks[stemMixer.scheduledUpTo++];
+        const chunkPosition = chunk.startSample / stemMixer.sampleRate;
+        const chunkSeconds = chunk.length / stemMixer.sampleRate;
+        // Every start time comes off the one (startedAt, startOffset) origin
+        // that mixerPosition() reads, so consecutive chunks cannot drift apart
+        // and the four stems cannot drift against each other.
+        let when = stemMixer.startedAt + (chunkPosition - stemMixer.startOffset);
+        let offset = 0;
+        if (when < context.currentTime) {
+            offset = context.currentTime - when;
+            if (offset >= chunkSeconds) continue; // entirely behind the playhead
+            when = context.currentTime;
+        }
+        const isLast = chunk.startSample + chunk.length >= stemMixer.totalSamples;
+        for (const name of STEM_NAMES) {
+            const source = context.createBufferSource();
+            source.buffer = chunk.buffers[name];
+            source.connect(stemMixer.gains[name]);
+            source.start(when, offset);
+            // Backstop for end-of-track while the tab is hidden and rAF is parked.
+            if (isLast && name === STEM_NAMES[0]) source.onended = () => mixerHandleEnded();
+            stemMixer.activeSources.push(source);
+        }
+    }
+}
+
+function mixerStopSources() {
+    for (const source of stemMixer.activeSources) {
+        source.onended = null; // our own stop() must not look like end-of-track
+        try {
+            source.stop();
+        } catch {
+            // never started
+        }
+        source.disconnect();
+    }
+    stemMixer.activeSources = [];
+    stemMixer.scheduledUpTo = 0;
+}
+
+function startTransportClock() {
+    const tick = () => {
+        if (stemMixer.playing) {
+            const position = mixerPosition();
+            if (!stemMixer.streaming && position >= stemMixer.duration - 0.001) {
+                mixerHandleEnded();
+                return;
+            }
+            if (stemMixer.streaming && position > mixerPlayableLimit() + 0.001) {
+                mixerUnderrun();
+                return;
+            }
+        }
+        updateTransportUi();
+        if (stemMixer.playing) stemMixer.clockFrame = requestAnimationFrame(tick);
+    };
+    cancelAnimationFrame(stemMixer.clockFrame);
+    tick();
+}
+
+// The playhead caught the frontier: park on it and pick back up when the next
+// region lands. Only reachable below realtime, i.e. a segment costing more
+// than the 3.9s hop it yields.
+function mixerUnderrun() {
+    const limit = mixerPlayableLimit();
+    mixerStopSources();
+    stemMixer.playing = false;
+    stemMixer.startOffset = limit;
+    stemMixer.resumeOnPublish = true;
+    updateTransportUi();
+    mixerEmit("pause");
+}
+
+async function mixerPlay() {
+    if (stemMixer.playing || !stemMixer.context || !stemMixer.chunks.length) return;
+    let offset = stemMixer.startOffset;
+    if (offset >= stemMixer.duration - 0.01) offset = 0;
+    const limit = mixerPlayableLimit();
+    if (offset > limit - MIN_PLAYABLE_SECONDS) {
+        // Nothing separated past here yet; wait for the next region instead of
+        // starting a run that would underrun on its first frame.
+        stemMixer.startOffset = Math.max(0, Math.min(offset, limit));
+        stemMixer.resumeOnPublish = stemMixer.streaming;
+        updateTransportUi();
+        return;
+    }
+    const context = stemMixer.context;
+    if (context.state === "suspended") {
+        try {
+            await context.resume();
+        } catch {
+            return; // no gesture available; leave the transport idle
+        }
+    }
+    stemMixer.startedAt = context.currentTime + START_LEAD_SECONDS;
+    stemMixer.startOffset = offset;
+    stemMixer.playing = true;
+    stemMixer.scheduledUpTo = 0;
+    scheduleReadyChunks();
+    startTransportClock();
+    mixerEmit("play");
+}
+
+function mixerPause() {
+    if (!stemMixer.playing) return;
+    const position = mixerPosition();
+    mixerStopSources();
+    stemMixer.playing = false;
+    stemMixer.resumeOnPublish = false;
+    stemMixer.startOffset = position;
+    updateTransportUi();
+    mixerEmit("pause");
+}
+
+function mixerHandleEnded() {
+    mixerStopSources();
+    stemMixer.playing = false;
+    stemMixer.resumeOnPublish = false;
+    stemMixer.startOffset = 0;
+    updateTransportUi();
+    mixerEmit("ended");
+}
+
+function mixerSeek(seconds) {
+    // Clamped to the frontier, so a click past it lands on the boundary and
+    // keeps playing rather than dropping into silence.
+    const target = Math.max(0, Math.min(seconds, mixerPlayableLimit()));
+    const wasPlaying = stemMixer.playing;
+    if (wasPlaying) mixerStopSources();
+    stemMixer.playing = false;
+    stemMixer.startOffset = target;
+    if (wasPlaying) mixerPlay().catch(() => {});
+    else updateTransportUi();
+}
+
+function formatClock(seconds) {
+    const total = Math.max(0, Math.floor(seconds));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function updateTransportUi() {
+    const playBtn = document.getElementById("mixer-play-btn");
+    const clock = document.getElementById("mixer-clock");
+    const stat = document.getElementById("mixer-stream-stat");
+    if (playBtn) {
+        playBtn.textContent = stemMixer.playing ? "⏸ Pause" : "▶ Play";
+        playBtn.disabled = stemMixer.chunks.length === 0;
+    }
+    if (clock) clock.textContent = `${formatClock(mixerPosition())} / ${formatClock(stemMixer.duration)}`;
+    if (stat) {
+        stat.style.display = stemMixer.streaming ? "" : "none";
+        if (stemMixer.streaming) {
+            const ratio = stemMixer.streamRatio ? ` · ${stemMixer.streamRatio.toFixed(1)}× realtime` : "";
+            const stalled = stemMixer.resumeOnPublish ? " · waiting for audio" : "";
+            stat.textContent = `separated ${formatClock(mixerPlayableLimit())}${ratio}${stalled}`;
+        }
+    }
+}
+
+// Called before every render so repeated separations do not leak audio
+// buffers (four stereo stems is ~340 MB for a four-minute track, and the
+// chunk buffers duplicate the stem arrays) or stack up waveform listeners
+// from the previous run.
+async function resetStemMixer() {
+    mixerStopSources();
+    cancelAnimationFrame(stemMixer.clockFrame);
+    const context = stemMixer.context;
+    stemMixer.context = null;
+    stemMixer.chunks = [];
+    stemMixer.gains = {};
+    stemMixer.tiles = {};
+    stemMixer.muted.clear();
+    stemMixer.solo.clear();
+    stemMixer.listeners = { play: [], pause: [], ended: [] };
+    stemMixer.duration = 0;
+    stemMixer.totalSamples = 0;
+    stemMixer.frontierSamples = 0;
+    stemMixer.streaming = false;
+    stemMixer.streamRatio = 0;
+    stemMixer.autoStarted = false;
+    stemMixer.resumeOnPublish = false;
+    stemMixer.playing = false;
+    stemMixer.startedAt = 0;
+    stemMixer.startOffset = 0;
+    stemMixer.clockFrame = null;
+    updateTransportUi();
+    if (context && context.state !== "closed") {
+        try {
+            await context.close();
+        } catch {
+            // already closing
+        }
+    }
+}
+
+function bindTransportControls() {
+    const playBtn = document.getElementById("mixer-play-btn");
+    const stopBtn = document.getElementById("mixer-stop-btn");
+    playBtn.onclick = () => {
+        if (stemMixer.playing) mixerPause();
+        else mixerPlay();
+    };
+    stopBtn.onclick = () => {
+        if (stemMixer.playing) {
+            mixerSeek(0);
+        } else {
+            stemMixer.startOffset = 0;
+            updateTransportUi();
+            mixerEmit("pause"); // redraw the playheads at zero
+        }
+    };
+}
+
+// Everything that does not need finished audio: tiles, waveforms, mute/solo,
+// and the audio graph. Streaming calls this before the segment loop so the
+// waveforms can fill in as regions land; `stems` holds the preallocated
+// output arrays, which the loop writes into in place.
+function renderStemShells(stems, sourceFilename, streaming) {
+    resetStemMixer();
     const grid = document.getElementById("stem-grid");
     grid.innerHTML = "";
     const baseName = stripExtension(sourceFilename || "audio");
+
+    stemMixer.sampleRate = stems.sampleRate;
+    stemMixer.totalSamples = stems.totalSamples;
+    stemMixer.duration = stems.totalSamples / stems.sampleRate;
+    // Must be set before the tiles are built: the first draw asks how much
+    // audio is ready, and a streaming run has none yet. Left unset, the
+    // waveforms would paint every column from the still-empty arrays and then
+    // consider themselves complete.
+    stemMixer.streaming = streaming;
+    createMixerContext();
+
+    const downloadAllBtn = document.getElementById("download-all-btn");
+    downloadAllBtn.disabled = true;
+    downloadAllBtn.onclick = null;
+
+    for (const name of STEM_NAMES) {
+        const stem = stems[name];
+        const tile = document.createElement("div");
+        tile.style.cssText = "border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px; background: #fafafa;";
+        tile.innerHTML = `
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <div style="font-weight: 600; color: ${STEM_COLORS[name]}; text-transform: uppercase; letter-spacing: 0.5px; font-size: 13px;">${name}</div>
+            <div class="stem-size" style="font-size: 11px; color: #888; font-family: 'Consolas', monospace;">—</div>
+          </div>
+          <canvas class="stem-waveform" data-color="${STEM_COLORS[name]}" aria-label="${name} waveform" style="display: block; width: 100%; height: 96px; margin-bottom: 8px; border: 1px solid #e0e0e0; cursor: pointer;"></canvas>
+          <div class="stem-toggles">
+            <button class="stem-toggle mute" data-stem="${name}" aria-pressed="false" title="Mute ${name}">M</button>
+            <button class="stem-toggle solo" data-stem="${name}" aria-pressed="false" title="Solo ${name}">S</button>
+          </div>
+          <button class="stem-download-btn" data-stem="${name}" style="width: 100%;" disabled>Separating ${baseName}.${name}.wav…</button>
+        `;
+        grid.appendChild(tile);
+        const canvas = tile.querySelector(".stem-waveform");
+        const waveformState = setupWaveform(canvas, stem.left, stem.right, stemTransport, STEM_COLORS[name], () =>
+            stemMixer.streaming ? stemMixer.frontierSamples : stemMixer.totalSamples,
+        );
+        const muteBtn = tile.querySelector(".stem-toggle.mute");
+        const soloBtn = tile.querySelector(".stem-toggle.solo");
+        muteBtn.addEventListener("click", () => toggleStemMute(name));
+        soloBtn.addEventListener("click", () => toggleStemSolo(name));
+        stemMixer.tiles[name] = {
+            muteBtn,
+            soloBtn,
+            canvas,
+            sizeEl: tile.querySelector(".stem-size"),
+            downloadBtn: tile.querySelector(".stem-download-btn"),
+            redraw: () => waveformState.draw(),
+        };
+    }
+    document.getElementById("results-gate-msg").style.display = "none";
+    document.getElementById("results-controls").style.display = "block";
+    bindTransportControls();
+    updateTransportUi();
+    updateStemTileStates();
+}
+
+// Encodes the WAVs and opens up the downloads. Clearing `streaming` also
+// lifts the seek clamp and drops the frontier marker off the waveforms.
+function finalizeStemResults(stems, sourceFilename) {
+    const baseName = stripExtension(sourceFilename || "audio");
     const blobs = {};
+    stemMixer.streaming = false;
     log("");
     log("=== ENCODING WAV FILES ===");
     for (const name of STEM_NAMES) {
@@ -1634,46 +2234,33 @@ function renderStemResults(stems, sourceFilename) {
         const blob = encodeWavFloat32(stem.left, stem.right, stems.sampleRate);
         const encMs = performance.now() - tEnc;
         blobs[name] = blob;
-        const url = URL.createObjectURL(blob);
-        stemObjectUrls.push(url);
         log(`  ${name}: ${(blob.size / 1048576).toFixed(1)} MB encoded in ${encMs.toFixed(0)}ms`);
-        const tile = document.createElement("div");
-        tile.style.cssText = "border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px; background: #fafafa;";
-        tile.innerHTML = `
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-            <div style="font-weight: 600; color: ${STEM_COLORS[name]}; text-transform: uppercase; letter-spacing: 0.5px; font-size: 13px;">${name}</div>
-            <div style="font-size: 11px; color: #888; font-family: 'Consolas', monospace;">${(blob.size / 1048576).toFixed(1)} MB</div>
-          </div>
-          <canvas class="stem-waveform" data-color="${STEM_COLORS[name]}" aria-label="${name} waveform" style="display: block; width: 100%; height: 96px; margin-bottom: 8px; border: 1px solid #e0e0e0; cursor: pointer;"></canvas>
-          <audio controls preload="metadata" style="width: 100%; margin-bottom: 8px;" src="${url}"></audio>
-          <button class="stem-download-btn" data-stem="${name}" style="width: 100%;">Download ${baseName}.${name}.wav</button>
-        `;
-        grid.appendChild(tile);
-        setupWaveform(
-            tile.querySelector(".stem-waveform"),
-            stem.left,
-            stem.right,
-            tile.querySelector("audio"),
-            STEM_COLORS[name],
-        );
-    }
-    for (const btn of grid.querySelectorAll(".stem-download-btn")) {
-        btn.addEventListener("click", () => {
-            const name = btn.dataset.stem;
-            triggerDownload(blobs[name], `${baseName}.${name}.wav`);
-        });
+        const tile = stemMixer.tiles[name];
+        if (!tile) continue;
+        tile.sizeEl.textContent = `${(blob.size / 1048576).toFixed(1)} MB`;
+        tile.downloadBtn.disabled = false;
+        tile.downloadBtn.textContent = `Download ${baseName}.${name}.wav`;
+        tile.downloadBtn.onclick = () => triggerDownload(blobs[name], `${baseName}.${name}.wav`);
+        tile.redraw();
     }
     const downloadAllBtn = document.getElementById("download-all-btn");
+    downloadAllBtn.disabled = false;
     downloadAllBtn.onclick = async () => {
         for (const name of STEM_NAMES) {
             triggerDownload(blobs[name], `${baseName}.${name}.wav`);
             await new Promise(resolve => setTimeout(resolve, 300));
         }
     };
-    document.getElementById("results-gate-msg").style.display = "none";
-    document.getElementById("results-controls").style.display = "block";
+    updateTransportUi();
     window.__htdemucsStemBlobs = blobs;
     log(`✓ Stem audio is ready.`);
+}
+
+// Non-streaming path: shells, then the whole track as one region.
+function renderStemResults(stems, sourceFilename) {
+    renderStemShells(stems, sourceFilename, false);
+    publishStemRegion(stems, 0, stems.totalSamples);
+    finalizeStemResults(stems, sourceFilename);
 }
 
 // ============================================================================
@@ -2093,7 +2680,10 @@ document.getElementById("backend-select").addEventListener("change", event => {
 
 document.getElementById("infer-btn").addEventListener("click", async () => {
     const btn = document.getElementById("infer-btn");
+    // Read once at the top of the run, so flipping it mid-run cannot half-apply.
+    const streamToggle = document.getElementById("stream-playback");
     btn.disabled = true;
+    streamToggle.disabled = true;
     setInferenceControlsDisabled(true);
     try {
         await runInference();
@@ -2102,9 +2692,21 @@ document.getElementById("infer-btn").addEventListener("click", async () => {
         console.error(err);
         document.getElementById("infer-result").innerHTML =
             `<span class="badge badge-error">Failed: ${err.message}</span>`;
+        // A run that died mid-stream leaves no producer behind. Stop playback
+        // but keep `streaming` set, so seeking stays clamped to the audio that
+        // did finalize instead of ranging over zeros.
+        if (stemMixer.playing) mixerPause();
+        stemMixer.resumeOnPublish = false;
+        for (const name of STEM_NAMES) {
+            // Otherwise the tiles sit on "Separating…" forever.
+            const tile = stemMixer.tiles[name];
+            if (tile) tile.downloadBtn.textContent = "Separation incomplete";
+        }
+        updateTransportUi();
     } finally {
         setInferenceControlsDisabled(false);
         btn.disabled = false;
+        streamToggle.disabled = false;
     }
 });
 

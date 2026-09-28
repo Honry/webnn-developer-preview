@@ -74,6 +74,7 @@ button:disabled { background: #ccc; cursor: not-allowed; }
 }
 .tensor-table th { background: #f0f0f0; font-weight: 600; }
 .progress-bar {
+  position: relative;
   width: 100%;
   height: 20px;
   background: #e0e0e0;
@@ -86,10 +87,91 @@ button:disabled { background: #ccc; cursor: not-allowed; }
   background: linear-gradient(90deg, #28a745, #20c997);
   width: 0%;
   transition: width 0.2s;
+}
+/* The label overlays the whole track instead of living inside the fill:
+   while the fill is narrower than its own text the label would wrap and
+   spill out of it, which is what made the first few steps look broken. */
+.progress-label {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
+  white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
+  /* The label straddles fill and track at mid-progress, so it needs a
+     halo to stay legible over both the green gradient and grey. */
+  color: #14532d;
+  text-shadow: 0 0 2px rgba(255, 255, 255, 0.7);
+}
+.mixer-transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+#mixer-clock {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 13px;
+  color: #555;
+  min-width: 92px;
+}
+.mixer-hint {
+  font-size: 12px;
+  color: #888;
+}
+/* Live separation-frontier readout. Same amber as the frontier line
+   on the waveforms, so the number and the marker read as one thing. */
+.mixer-stat {
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 12px;
+  color: #8a5a00;
+  background: #fff8e8;
+  border: 1px solid #f3dca8;
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+.stream-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  font-size: 13px;
+  color: #555;
+  cursor: pointer;
+}
+.stream-toggle input {
+  cursor: pointer;
+}
+.stem-toggles {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.stem-toggle {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  background: #eceff1;
+  color: #546e7a;
+}
+.stem-toggle:hover {
+  background: #dfe4e7;
+}
+.stem-toggle.active {
+  background: #37474f;
+  color: white;
+}
+.stem-toggle.active:hover {
+  background: #263238;
+}
+.stem-toggle.solo.active {
+  background: #f5a623;
+  color: #3a2a00;
+}
+.stem-toggle.solo.active:hover {
+  background: #e09612;
 }
