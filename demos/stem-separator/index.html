@@ -156,20 +156,14 @@
                             <option value="wasm">WASM</option>
                         </select>
                     </div>
-                    <div class="key"><button id="load-btn">Load Model</button></div>
+                    <div class="key"><button id="load-btn" disabled>Load Model</button></div>
                     <div id="status">Ready. Load the model to begin.</div>
                 </div>
                 <div id="log" class="log-output"></div>
                 <div id="audio-info"></div>
                 <div id="stem-stats"></div>
                 <div class="footerinfo">
-                    <div id="webnnstatus">
-                        <span id="circle"></span>
-                        <span id="info"
-                            >WebNN supported · <a href="?devicetype=gpu">GPU</a> ·
-                            <a href="?devicetype=npu">NPU</a></span
-                        >
-                    </div>
+                    <div id="webnnstatus"><span id="circle"></span> <span id="info">WebNN</span></div>
                     <div id="versions">
                         <div id="chromiumversion"></div>
                         <div id="ortversion"></div>

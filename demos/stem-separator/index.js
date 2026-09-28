@@ -1,24 +1,35 @@
 /* eslint-disable no-undef, no-unused-vars, no-empty */
-import { $, log, setupORT, showCompatibleChromiumVersion, getWebnnStatus } from "../../assets/js/common_utils.js";
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+//
+// An example how to run HTDemucs stem separation with webnn in onnxruntime-web.
+//
 
-const HF_MODEL_BASE = "https://huggingface.co/webnn/stem-separator/resolve/main/onnx";
-const isRemote = location.href.includes("github.io");
+import {
+    $,
+    log,
+    logError,
+    setupORT,
+    showCompatibleChromiumVersion,
+    getWebnnStatus,
+    getQueryValue,
+    checkRemoteEnvironment,
+    getHuggingFaceDomain,
+} from "../../assets/js/common_utils.js";
+import { WebNNPerf } from "../webnn-perf.js";
 
-const MODELS = {
-    htdemucs_fwd: {
-        label: "htdemucs_fwd (our export, Path A)",
-        url: isRemote ? `${HF_MODEL_BASE}/htdemucs_fwd.onnx` : "./models/htdemucs_fwd/htdemucs_fwd.onnx",
-        opfsPath: "models/htdemucs_fwd/htdemucs_fwd.onnx",
-        externalDataUrl: isRemote
-            ? `${HF_MODEL_BASE}/htdemucs_fwd.onnx.data`
-            : "./models/htdemucs_fwd/htdemucs_fwd.onnx.data",
-        externalDataOpfsPath: "models/htdemucs_fwd/htdemucs_fwd.onnx.data",
-        sizeMB: 170,
-        fwdOnly: true,
-        inputNames: ["x", "xt"],
-        outputNames: ["x_out", "xt_out"],
-    },
+const MODEL = {
+    name: "htdemucs_fwd",
+    host: checkRemoteEnvironment()
+        ? "https://huggingface.co/webnn/stem-separator/resolve/main/onnx"
+        : "./models/htdemucs_fwd",
+    file: "htdemucs_fwd.onnx",
+    externalData: "htdemucs_fwd.onnx.data",
+    size: "170MB",
+    fwdOnly: true,
 };
+
+const VERBOSE = getQueryValue("verbose")?.toLowerCase() === "true";
 
 function updateBackendBadge(backend) {
     const badge = document.getElementById("badge");
@@ -118,40 +129,31 @@ async function writeToOPFS(path, arrayBuffer) {
 }
 
 // ============================================================================
-// Load ONNX Runtime Web
+// WebNN status
 // ============================================================================
 
-async function loadOrt() {
-    if (window.ort) {
-        return;
-    }
-    log("Loading ONNX Runtime Web...");
-    await setupORT("stem-separator", "dev");
-    window.ort.env.wasm.numThreads = 1;
-    window.ort.env.wasm.simd = true;
-    log("✓ ONNX Runtime Web loaded");
-}
-
-async function updateWebnnStatus() {
+const checkWebNN = async () => {
     const status = $("#webnnstatus");
     const info = $("#info");
-    const links = ' · <a href="?devicetype=gpu">GPU</a> · <a href="?devicetype=npu">NPU</a>';
-    const status_ = await getWebnnStatus();
-    if (status_.webnn) {
-        status.className = "green";
-        info.innerHTML = "WebNN supported" + links;
+    const webnnStatus = await getWebnnStatus();
+
+    if (webnnStatus.webnn) {
+        status.setAttribute("class", "green");
+        info.innerHTML = `WebNN supported · <a href="./?devicetype=gpu">GPU</a> · <a href="./?devicetype=npu">NPU</a>`;
     } else {
-        status.className = "red";
-        info.innerHTML = (status_.error ? `WebNN not supported: ${status_.error}` : "WebNN not supported") + links;
+        status.setAttribute("class", "red");
+        const reason = webnnStatus.error ? `WebNN not supported: ${webnnStatus.error}` : "WebNN not supported";
+        info.innerHTML = `${reason} <a id="webnn_na" href="../../install.html" title="WebNN Installation Guide">Set up WebNN</a>`;
+        logError(`[Error] ${reason}`);
     }
-}
+};
 
 // ============================================================================
 // Download model with progress
 // ============================================================================
 
 async function downloadWithProgress(url, onProgress) {
-    log(`Downloading from ${url}...`);
+    log(`[Load] Downloading from ${url}...`);
     const response = await fetch(url);
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -178,21 +180,19 @@ async function downloadWithProgress(url, onProgress) {
         offset += chunk.length;
     }
 
-    log(`✓ Downloaded ${(received / 1048576).toFixed(1)} MB`);
+    log(`[Load] Downloaded ${(received / 1048576).toFixed(1)} MB`);
     return buffer.buffer;
 }
 
 // `range` is the [from, to] slice of the overall load progress this file fills.
 async function loadOneFile(label, opfsPath, url, shortLabel, range) {
     const [from, to] = range;
-    log(`Checking OPFS cache for ${label}...`);
     let buffer = await readFromOPFS(opfsPath);
     if (buffer) {
-        log(`✓ ${label} loaded from cache (${(buffer.byteLength / 1048576).toFixed(1)} MB)`);
+        log(`[Load] ${label} loaded from OPFS cache · ${(buffer.byteLength / 1048576).toFixed(1)} MB`);
         setLoadProgress(to, `Loaded ${shortLabel} from cache`);
         return buffer;
     }
-    log(`Cache miss for ${label}, fetching from disk...`);
     buffer = await downloadWithProgress(url, (received, total) => {
         setLoadProgress(
             from + ((to - from) * received) / total,
@@ -200,30 +200,23 @@ async function loadOneFile(label, opfsPath, url, shortLabel, range) {
         );
     });
     setLoadProgress(to);
-    log(`Caching ${label} to OPFS...`);
-    const cached = await writeToOPFS(opfsPath, buffer);
-    if (cached) log(`✓ ${label} cached to OPFS`);
+    if (await writeToOPFS(opfsPath, buffer)) log(`[Load] ${label} cached to OPFS`);
     return buffer;
 }
 
-async function loadModelBuffer(modelConfig) {
-    const mainBuffer = await loadOneFile(
-        modelConfig.label,
-        modelConfig.opfsPath,
-        modelConfig.url,
-        "model graph",
-        [0, 5],
-    );
-    let externalBuffer = null;
-    if (modelConfig.externalDataUrl) {
-        externalBuffer = await loadOneFile(
-            modelConfig.label + " (weights)",
-            modelConfig.externalDataOpfsPath,
-            modelConfig.externalDataUrl,
-            "weights",
-            [5, 85],
-        );
+async function loadModelBuffer() {
+    let host = MODEL.host;
+    if (host.includes("huggingface.co")) {
+        host = host.replace("huggingface.co", await getHuggingFaceDomain());
     }
+    const fetchFile = (file, shortLabel, range) =>
+        WebNNPerf.time(
+            "webnn.model.fetch",
+            () => loadOneFile(file, `models/${MODEL.name}/${file}`, `${host}/${file}`, shortLabel, range),
+            { model: file },
+        );
+    const mainBuffer = await fetchFile(MODEL.file, "model graph", [0, 5]);
+    const externalBuffer = await fetchFile(MODEL.externalData, "weights", [5, 85]);
     return { mainBuffer, externalBuffer };
 }
 
@@ -255,65 +248,62 @@ async function detectCapabilities() {
     return caps;
 }
 
-async function createSessionWithCascade(modelBuffers, caps, selection, modelConfig) {
+async function createSessionWithCascade(modelBuffers, caps, selection) {
     const all = [
-        { id: "webnn-npu", name: "webnn", deviceType: "npu", label: "WebNN NPU", available: caps.webnn_npu },
-        { id: "webnn-gpu", name: "webnn", deviceType: "gpu", label: "WebNN GPU", available: caps.webnn_gpu },
-        { id: "webgpu", name: "webgpu", label: "WebGPU", available: caps.webgpu },
-        { id: "wasm", name: "wasm", label: "WASM", available: true },
+        { id: "webnn-npu", name: "webnn", device: "npu", label: "WebNN NPU", available: caps.webnn_npu },
+        { id: "webnn-gpu", name: "webnn", device: "gpu", label: "WebNN GPU", available: caps.webnn_gpu },
+        { id: "webgpu", name: "webgpu", device: "gpu", label: "WebGPU", available: caps.webgpu },
+        { id: "wasm", name: "wasm", device: "cpu", label: "WASM", available: true },
     ];
     const backends = selection === "auto" ? all : all.filter(backend => backend.id === selection);
     if (backends.length === 0) {
         throw new Error(`Backend "${selection}" not found`);
     }
     if (selection !== "auto") {
-        log(`Backend forced to ${backends[0].label}.`);
+        log(`[Session Create] Backend forced to ${backends[0].label}`);
     }
 
     const { mainBuffer, externalBuffer } = modelBuffers;
-    const externalDataArg = externalBuffer
-        ? [
-              {
-                  data: externalBuffer,
-                  path: (modelConfig?.externalDataUrl || "").split("/").pop() || "htdemucs_fwd.onnx.data",
-              },
-          ]
-        : undefined;
 
     for (const backend of backends) {
         if (!backend.available) {
-            log(`  ${backend.label}: unavailable`);
+            log(`[Session Create] ${backend.label}: unavailable`);
             continue;
         }
 
         try {
-            log(`Trying ${backend.label}...`);
+            log(`[Session Create] Trying ${backend.label}...`);
+            WebNNPerf.configure({ model: MODEL.name, device: backend.device, provider: backend.name });
             const sessionOptions = {
                 executionProviders: [],
-                logSeverityLevel: 3,
+                logSeverityLevel: VERBOSE ? 0 : 3, // 0: verbose, 1: info, 2: warning, 3: error
+                externalData: [{ data: externalBuffer, path: MODEL.externalData }],
             };
-            if (externalDataArg) {
-                sessionOptions.externalData = externalDataArg;
-            }
 
             if (backend.name === "webnn") {
-                const mlContext = await navigator.ml.createContext({ deviceType: backend.deviceType });
+                const mlContext = await WebNNPerf.time("webnn.context.create", () =>
+                    navigator.ml.createContext({ deviceType: backend.device }),
+                );
                 sessionOptions.executionProviders.push({
                     name: "webnn",
-                    deviceType: backend.deviceType,
+                    deviceType: backend.device,
                     context: mlContext,
                 });
             } else {
                 sessionOptions.executionProviders.push({ name: backend.name });
             }
 
-            const tCreate = performance.now();
-            const session = await ort.InferenceSession.create(mainBuffer, sessionOptions);
-            const createSec = (performance.now() - tCreate) / 1000;
-            log(`✓ Session created with ${backend.label} in ${createSec.toFixed(2)}s`);
+            const start = performance.now();
+            const session = await WebNNPerf.time(
+                "webnn.session.create",
+                () => ort.InferenceSession.create(mainBuffer, sessionOptions),
+                { model: MODEL.name },
+            );
+            const sessionCreationTime = (performance.now() - start).toFixed(2);
+            log(`[Session Create] Create ${MODEL.name} with ${backend.label} completed · ${sessionCreationTime}ms`);
             return { session, backendLabel: backend.label };
         } catch (err) {
-            log(`✗ ${backend.label} failed: ${err.message}`);
+            log(`[Session Create] ${backend.label} failed: ${err.message}`);
             continue;
         }
     }
@@ -1343,7 +1333,7 @@ async function runInference() {
     // panel empty until it finishes, rather than showing stale results.
     clearStemResults();
     log("");
-    log(`=== SEPARATION + OVERLAP-ADD (model: ${modelConfig.label}) ===`);
+    log(`=== SEPARATION + OVERLAP-ADD (model: ${modelConfig.name}) ===`);
     const fwdOnly = modelConfig.fwdOnly === true;
     const normalizeExternally = !fwdOnly && modelConfig.normalizeExternally !== false;
     let mean = 0;
@@ -1417,7 +1407,10 @@ async function runInference() {
             const { xBuf, xtBuf, mean: preMean, std: preStd, meant, stdt } = htdemucsPreForward(seg.data);
             const xTensor = new ort.Tensor("float32", xBuf, [1, 4, STFT_FREQ_BINS, STFT_TIME_FRAMES]);
             const xtTensor = new ort.Tensor("float32", xtBuf, [1, 2, SEGMENT_LENGTH]);
-            const output = await session.run({ x: xTensor, xt: xtTensor });
+            const output = await WebNNPerf.time("webnn.inference", () => session.run({ x: xTensor, xt: xtTensor }), {
+                model: modelConfig.name,
+                iteration: segIdx + 1,
+            });
             const xOut = output.x_out;
             const xtOut = output.xt_out;
             sources = htdemucsPostForward(xOut.data, xtOut.data, preMean, preStd, meant, stdt);
@@ -1432,7 +1425,10 @@ async function runInference() {
                 }
                 feeds[extra.name] = extra.tensor;
             }
-            const output = await session.run(feeds);
+            const output = await WebNNPerf.time("webnn.inference", () => session.run(feeds), {
+                model: modelConfig.name,
+                iteration: segIdx + 1,
+            });
             const outputTensor = output[outputName];
             sources = outputTensor.data;
             segTensors = [outputTensor, tensor];
@@ -2464,7 +2460,7 @@ async function runModelValidation() {
     }
     resultEl.innerHTML = "<em>Fetching reference files...</em>";
     log("");
-    log(`=== MODEL fwd VALIDATION (JS vs Python CPU, model=${modelConfig.label}) ===`);
+    log(`=== MODEL fwd VALIDATION (JS vs Python CPU, model=${modelConfig.name}) ===`);
 
     if (modelConfig.fwdOnly) {
         // For our Intel-style fwd-only export: feed Python-reference prepped_x, prepped_xt;
@@ -2611,7 +2607,7 @@ function updateSessionState() {
     const hasSession = loadedSelection !== null;
     const stale = isSessionStale();
     loadBtn.textContent = hasSession ? (stale ? "Reload Model" : "Model Loaded") : "Load Model";
-    loadBtn.disabled = hasSession && !stale;
+    loadBtn.disabled = !window.ort || (hasSession && !stale);
     loadBtn.classList.toggle("attention", stale);
     document.getElementById("infer-btn").disabled = !hasSession || stale || !window.__htdemucsChunks;
     if (hasSession) {
@@ -2637,8 +2633,6 @@ async function main() {
     setLoadProgress(0, "Preparing…");
 
     try {
-        await loadOrt();
-
         const previous = window.__htdemucsSession;
         if (previous) {
             // Freed before the new compile so two copies never sit on the NPU/GPU at once.
@@ -2663,23 +2657,22 @@ async function main() {
         );
 
         log("");
-        const modelConfig = MODELS.htdemucs_fwd;
-        log(`Using model: ${modelConfig.label}`);
-        const modelBuffer = await loadModelBuffer(modelConfig);
+        log(`[Load] Loading model ${MODEL.name} · ${MODEL.size}`);
+        const modelBuffer = await loadModelBuffer();
 
         log("");
-        log("Creating ORT session (trying backends in cascade)...");
+        log("[Session Create] Trying backends in cascade...");
         const selection = backendSelect.value;
         updateBackendBadge(selection);
         setLoadProgress(90, `Compiling for ${backendSelect.selectedOptions[0].textContent}…`);
-        const { session, backendLabel } = await createSessionWithCascade(modelBuffer, caps, selection, modelConfig);
+        const { session, backendLabel } = await createSessionWithCascade(modelBuffer, caps, selection);
         window.__htdemucsSession = session;
         window.__htdemucsBackend = backendLabel;
-        window.__htdemucsModelConfig = modelConfig;
+        window.__htdemucsModelConfig = MODEL;
         loadedSelection = selection;
 
         log("");
-        log("✓ Model loaded and ready for audio.");
+        log("[Session Create] Ready to separate audio");
         document.getElementById("audio-file").disabled = false;
         if (document.getElementById("mix-track").hidden) {
             showStageMessage("Model ready — upload an audio file to begin.");
@@ -2687,8 +2680,7 @@ async function main() {
         setLoadProgress(100);
         updateSessionState();
     } catch (err) {
-        log("✗ Error: " + err.message);
-        console.error(err);
+        logError(`[Load] failed, ${err.message}`);
         updateSessionState();
         statusEl.innerHTML = `<span class="badge badge-error">Failed: ${err.message}</span>`;
         if (!window.__htdemucsSession) document.getElementById("device").textContent = "—";
@@ -2703,33 +2695,35 @@ async function main() {
     }
 }
 
+// Same query scheme as the other demos: ?provider=webnn|webgpu|wasm&devicetype=npu|gpu.
 function applyBackendFromQuery() {
-    const raw = new URLSearchParams(window.location.search).get("devicetype");
-    if (!raw) return;
-    const key = raw.toLowerCase();
-    const mapping = {
-        npu: "webnn-npu",
-        gpu: "webnn-gpu",
-        "webnn-npu": "webnn-npu",
-        "webnn-gpu": "webnn-gpu",
-        webgpu: "webgpu",
-        wasm: "wasm",
-        auto: "auto",
-    };
-    const target = mapping[key];
-    if (!target) return;
-    const select = document.getElementById("backend-select");
-    const optionExists = Array.from(select.options).some(option => option.value === target);
+    const provider = getQueryValue("provider")?.toLowerCase();
+    const deviceType = getQueryValue("devicetype")?.toLowerCase();
+    if (!provider && !deviceType) return;
+    const target = provider === "webgpu" || provider === "wasm" ? provider : `webnn-${deviceType || "gpu"}`;
+    const optionExists = Array.from(backendSelect.options).some(option => option.value === target);
     if (!optionExists) return;
-    select.value = target;
-    updateBackendBadge(select.value);
+    backendSelect.value = target;
+    updateBackendBadge(backendSelect.value);
     log(`Backend preselected from query: ${target}`);
 }
 
-applyBackendFromQuery();
-showCompatibleChromiumVersion("stem-separator");
-updateWebnnStatus();
-loadOrt();
+const ui = async () => {
+    applyBackendFromQuery();
+    await setupORT("stem-separator", "dev");
+    showCompatibleChromiumVersion("stem-separator");
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.simd = true;
+    // WASM and WebGPU still work without WebNN, so loading is not gated on the check below.
+    loadBtn.disabled = false;
+    await checkWebNN();
+};
+
+if (document.readyState !== "loading") {
+    ui();
+} else {
+    document.addEventListener("DOMContentLoaded", ui, false);
+}
 
 loadBtn.addEventListener("click", main);
 backendSelect.addEventListener("change", updateSessionState);
@@ -2754,8 +2748,7 @@ document.getElementById("infer-btn").addEventListener("click", async () => {
     try {
         await runInference();
     } catch (err) {
-        log("✗ Inference error: " + err.message);
-        console.error(err);
+        logError(`[Session Run] failed, ${err.message}`);
         document.getElementById("infer-result").innerHTML =
             `<span class="badge badge-error">Failed: ${err.message}</span>`;
         // A run that died mid-stream leaves no producer behind. Stop playback
@@ -2783,8 +2776,7 @@ document.getElementById("audio-file").addEventListener("change", async event => 
     try {
         await handleAudioFile(file);
     } catch (err) {
-        log("✗ Audio ingest error: " + err.message);
-        console.error(err);
+        logError(`[Audio] failed, ${err.message}`);
         showStageMessage(`Failed to load audio: ${err.message}`);
     } finally {
         input.disabled = false;

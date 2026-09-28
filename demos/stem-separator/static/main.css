@@ -165,13 +165,17 @@ h1.title span {
 }
 
 .settings .key button.attention {
-    box-shadow: 0 0 0 3px var(--main-1), 0 3px 15px -1px var(--main-5);
+    box-shadow:
+        0 0 0 3px var(--main-1),
+        0 3px 15px -1px var(--main-5);
     animation: attention-pulse 1.6s ease-in-out infinite;
 }
 
 @keyframes attention-pulse {
     50% {
-        box-shadow: 0 0 0 5px var(--main-1), 0 3px 15px -1px var(--main-5);
+        box-shadow:
+            0 0 0 5px var(--main-1),
+            0 3px 15px -1px var(--main-5);
     }
 }
 
@@ -731,7 +735,9 @@ button:disabled:hover {
     /* The label straddles fill and track at mid-progress, so it needs a
        halo to stay legible over both the blue gradient and grey. */
     color: var(--font);
-    text-shadow: 0 0 3px var(--bg), 0 0 1px var(--bg);
+    text-shadow:
+        0 0 3px var(--bg),
+        0 0 1px var(--bg);
 }
 
 #mixer-clock {
