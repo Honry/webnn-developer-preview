@@ -64,9 +64,7 @@ import { setupWaveform } from "./waveform.js";
 
 const MODEL = {
     name: "htdemucs_fwd",
-    host: checkRemoteEnvironment()
-        ? "https://huggingface.co/webnn/stem-separator/resolve/main/onnx"
-        : "./models/htdemucs_fwd",
+    host: checkRemoteEnvironment() ? "https://huggingface.co/webnn/stem-separator/resolve/main/onnx" : "./models",
     file: "htdemucs_fwd.onnx",
     externalData: "htdemucs_fwd.onnx.data",
     size: "170MB",
