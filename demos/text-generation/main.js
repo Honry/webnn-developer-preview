@@ -330,6 +330,33 @@ let badge;
 let ctrlKey = false;
 let ready = false;
 let cleanCache = false;
+// Stateful mode (enable_causallm): the OV backend counts every fed token against max_length for the
+// lifetime of the session, and Ctrl+Enter cannot reset that. Once it is exhausted the only way out
+// is a page refresh, so further prompts are refused.
+let contextFull = false;
+
+function contextFullMessage() {
+    return `Context limit reached (max_length=${config.max_length}). Please refresh the page to start over.`;
+}
+
+// Lock the input once the backend context is used up (or a prompt no longer fits in what is left).
+function lockIfContextFull() {
+    if (!llm.enableCausalLM) {
+        return;
+    }
+    if (llm.remainingCapacity <= 0) {
+        contextFull = true;
+    }
+    if (!contextFull) {
+        return;
+    }
+    const message = contextFullMessage();
+    userInput.setAttribute("contenteditable", "false");
+    userInput.dataset.text = message;
+    sendButton.disabled = true;
+    performanceIndicator.innerHTML = `<span class="perf-metric">${message}</span>`;
+    logUser(message);
+}
 
 const clipboardIcon = `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='currentColor' class='bi bi-clipboard' viewBox='0 0 16 16'>
 <path d='M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z'/>
@@ -395,6 +422,10 @@ function copyTextToClipboard(responseDiv) {
 //
 async function submitRequest(e) {
     if (ready === false) {
+        return;
+    }
+    if (contextFull) {
+        logUser(contextFullMessage());
         return;
     }
     if (userInput.innerText.length < 1 && sendButton.disabled === false && ctrlKey === false) {
@@ -471,12 +502,14 @@ async function submitRequest(e) {
             sendButton.disabled = false;
             buttons.setAttribute("class", "button-group key");
             spinner.remove();
+            lockIfContextFull();
         })
         .catch(error => {
             console.error(error);
             sendButton.disabled = false;
             buttons.setAttribute("class", "button-group key");
             spinner.remove();
+            lockIfContextFull();
         });
 
     // Clear user input
@@ -680,6 +713,15 @@ async function Query(continuation, query, cb) {
     // Convert inputIds to BigInt
     inputIds = Array.from(inputIds).map(num => BigInt(num));
     logUser(`Prompt length: ${inputIds.length}`);
+
+    // Stateful mode: refuse a prompt that no longer fits in what the backend KV cache has left.
+    if (llm.enableCausalLM && inputIds.length > llm.remainingCapacity) {
+        contextFull = true;
+        throw new Error(
+            `Prompt (${inputIds.length} tokens) exceeds the remaining backend context ` +
+                `(${Math.max(llm.remainingCapacity, 0)}/${llm.maxLength}).`,
+        );
+    }
 
     let timeToFirstToken;
     const startTimer = performance.now();

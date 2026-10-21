@@ -69,6 +69,10 @@ export class LLM {
     maxLength = 2048;
     mlContext = undefined;
     startLength = 0;
+    // Positions consumed in the backend-managed KV cache (stateful / enableCausalLM mode). Unlike
+    // startLength, it is NOT reset by Ctrl+Enter: the OV backend keeps counting against max length
+    // until the session is destroyed. Only dispose() clears it.
+    backendTokenCount = 0;
     logitsBuffer = undefined;
     repetitionPenalty = 1.0;
     temperature = 0.0;
@@ -603,6 +607,19 @@ export class LLM {
         }
     }
 
+    // Positions left before hitting maxLength. In stateful mode the OV backend owns the KV cache and
+    // its length keeps growing across Ctrl+Enter (which only resets startLength), so count against
+    // backendTokenCount; otherwise the context is just startLength.
+    get remainingCapacity() {
+        return this.maxLength - (this.enableCausalLM ? this.backendTokenCount : this.startLength);
+    }
+
+    // Advance the context by n tokens that were just fed to the model.
+    _advance(n) {
+        this.startLength += n;
+        this.backendTokenCount += n;
+    }
+
     // Tell generate() to stop
     abort() {
         this.stop = true;
@@ -829,6 +846,12 @@ export class LLM {
                     `startLength=${this.startLength}, inputIdsLen=${inputIdsLen}. Use Ctrl+Enter to start a new conversation.`,
             );
         }
+        if (this.enableCausalLM && inputIdsLen > this.remainingCapacity) {
+            throw new Error(
+                `Backend KV cache is full (${this.backendTokenCount}/${this.maxLength} used, prompt needs ${inputIdsLen}). ` +
+                    `Ctrl+Enter cannot clear it; refresh the page to start over.`,
+            );
+        }
 
         this.stop = false;
         let lastToken = 0;
@@ -849,7 +872,7 @@ export class LLM {
                 await this._feedToken(Number(inputIds[i]));
                 const outputs = await this._runStep();
                 this.updateKvCache(outputs);
-                this.startLength++;
+                this._advance(1);
             }
             this.applyRepetitionPenalty(this.logitsBuffer, this.vocabSize, this.outputTokens, this.repetitionPenalty);
             lastToken = this.selectToken(this.logitsBuffer, this.vocabSize);
@@ -899,7 +922,7 @@ export class LLM {
             }
             this.applyRepetitionPenalty(this.logitsBuffer, this.vocabSize, this.outputTokens, this.repetitionPenalty);
             lastToken = this.selectToken(this.logitsBuffer, this.vocabSize);
-            this.startLength = this.startLength + inputIdsLen;
+            this._advance(inputIdsLen);
             this.updateKvCache(outputs);
         }
 
@@ -915,7 +938,7 @@ export class LLM {
         this.inferenceTokenCount = 0;
         // Decode loop: one token per step (seqLen=1) — the same per-token operation as
         // token-by-token prefill, differing only in that the token comes from sampling.
-        while (this.eos.indexOf(lastToken) == -1 && !this.stop && this.startLength < this.maxLength) {
+        while (this.eos.indexOf(lastToken) == -1 && !this.stop && this.remainingCapacity > 0) {
             await this._feedToken(lastToken);
             const outputs = await this._runStep();
             this.applyRepetitionPenalty(this.logitsBuffer, this.vocabSize, this.outputTokens, this.repetitionPenalty);
@@ -934,7 +957,7 @@ export class LLM {
                 callback(this.outputTokens);
             }
             this.updateKvCache(outputs);
-            this.startLength++;
+            this._advance(1);
         }
         if (this.provider == "webgpu" && this.profiler) {
             await this.session.endProfiling();
@@ -976,6 +999,7 @@ export class LLM {
         this.kvDims = [];
         this.mlContext = undefined;
         this.startLength = 0;
+        this.backendTokenCount = 0;
         this.embedOutputDecode = undefined;
         this.embedOutputPrefill = undefined;
     }
