@@ -417,6 +417,12 @@ function copyTextToClipboard(responseDiv) {
     lastResponseMessageOuter.appendChild(copyButton);
 }
 
+// Ctrl + Enter starts a new conversation. Not in stateful mode (enable_causallm): the KV cache lives
+// in the OV backend and cannot be cleared from here, so Ctrl + Enter behaves exactly like Enter.
+function isNewConversation(e) {
+    return e.ctrlKey && e.key === "Enter" && !config.enable_causallm;
+}
+
 //
 // User hits send, Enter or Ctrl + Enter
 //
@@ -440,7 +446,7 @@ async function submitRequest(e) {
     }
 
     // Enter will continue the conversation, Ctrl + Enter will clear the chat history and start a new conversation
-    const continuation = !(e.ctrlKey && e.key === "Enter");
+    const continuation = !isNewConversation(e);
 
     if (continuation) {
         logUser(`Continuation: ${continuation}`);
@@ -520,7 +526,7 @@ async function submitRequest(e) {
 // Event listener for Ctrl + Enter or Enter
 //
 $("#user-input").addEventListener("keydown", async function (e) {
-    if (e.ctrlKey && e.key === "Enter") {
+    if (isNewConversation(e)) {
         ctrlKey = true;
         cleanCache = true;
         submitRequest(e);
